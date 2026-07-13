@@ -1,0 +1,14 @@
+{
+  "name": "Pathbound",
+  "short_name": "Pathbound",
+  "description": "A node-map roguelike: every stat and skill you skip feeds the boss.",
+  "start_url": ".",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#15172a",
+  "theme_color": "#15172a",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
