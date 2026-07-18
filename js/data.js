@@ -1,7 +1,6 @@
 // ===== Pathbound (Idle rework) — game data & config =====
 'use strict';
 
-// Ten stats, five pairs + Soul + Perseverance. All start at CFG.startStat.
 const STATS = ['str', 'end', 'dex', 'agi', 'int', 'wis', 'fai', 'pie', 'sol', 'per'];
 
 const STAT_INFO = {
@@ -21,37 +20,34 @@ const CFG = {
   tickMs: 100,
   startStat: 5,
   slotCount: 8,
-  cdSkill: 2,               // cooldown after a skill (stamina)
-  cdSpell: 3,               // cooldown after a spell (mana/resonance)
-  dazedSlow: 0.9,           // receiving damage: ability speed ×0.9...
-  dazedSecs: 0.25,          // ...for this long
-  winsToAdvance: 10,        // base victory requirement per page
+  cdSkill: 2,
+  cdSpell: 3,
+  dazedSlow: 0.9,
+  dazedSecs: 0.25,
+  winsToAdvance: 10,
   levelCap: 1000,
   classlessUnlock: 30,
-  // upgrades
   upgradeFlatStep: 1,
   upgradeMult: 1.1,
   upgradeUnlock: 30,
-  // prestige
   prestigeLevel: 100,
   prestigeDivisor: 9,
   prestigeSpeedPerClass: 0.5,
-  // equipment / economy
   dropChance: 0.10,
   runeChance: 0.01,
-  tomeChance: 0.001,        // tomes always fit in the bag, even when full
-  goldPerChapter: 10,       // gold per kill = chapter × this (× book mult)
+  tomeChance: 0.001,
   invSize: 100,
   prefixChances: [1, 0.5, 0.1, 0.01, 0.001],
   multChances: [[2, 0.10], [3, 0.01], [4, 0.001]],
   maxItemUpgrades: 10,
-  maxRerolls: 2,
-  bsCosts: { upgrade: 100, reroll: 250, extract: 500, augment: 1500 },
-  bookStatMult: 3,          // Hard/Nightmare/Hell multiply stats & rewards by this
+  maxRerolls: 6,
+  rerollCosts: [250, 250, 500, 500, 1000, 1000], // cost of reroll n+1
+  bsCosts: { upgrade: 100, extract: 500, augment: 1500 },
+  tipLinger: 3,          // seconds a tooltip stays after release
+  maxAllies: 4,          // per side
   dmgScale: 1,
 };
 
-// ---- equipment ----
 const EQUIP_SLOTS = {
   head: 'Helm', chest: 'Cuirass', legs: 'Leggings',
   feet: 'Greaves', hands: 'Gauntlets', shoulders: 'Pauldron',
@@ -59,39 +55,66 @@ const EQUIP_SLOTS = {
 const GEAR_STATS = ['str', 'end', 'dex', 'agi', 'int', 'wis', 'fai', 'pie'];
 
 // ---- status keywords ----
-// dur-based unless charge:true (consumed by damaging abilities).
+// kind: 'charge' (consumed by damaging abilities), 'stack' (per-stack timers,
+// values snapshot the inflictor's stats), 'dur' (single timer), 'instant'.
 const STATUSES = {
-  guilt:       { name: 'Guilt',       charge: true, bad: true, desc: 'Next damaging ability deals half damage' },
-  confusion:   { name: 'Confusion',   charge: true, bad: true, desc: 'Next damaging ability has a 50% chance to hit yourself' },
-  empower:     { name: 'Empowerment', charge: true, desc: 'Next X damaging abilities deal bonus damage equal to your Piety' },
-  blind:       { name: 'Blind',       bad: true, desc: 'Abilities cannot activate — they wait, ready, until Blind ends' },
-  protection:  { name: 'Protection',  desc: 'Damage received reduced 25%' },
-  frost:       { name: 'Frost',       bad: true, desc: 'Ability Speed −10% · health regen halved' },
-  poison:      { name: 'Poison',      bad: true, desc: 'Health regen stops · lose 1% max health per second' },
-  bruised:     { name: 'Bruised',     bad: true, desc: 'Skill damage received +50%' },
-  interrupted: { name: 'Interrupted', bad: true, desc: 'Ability Speed stops' },
-  intimidated: { name: 'Intimidated', bad: true, desc: 'Ability Speed −25%' },
-  enlarged:    { name: 'Enlarged',    desc: '+30% Endurance and Strength' },
-  shrink:      { name: 'Shrink',      desc: '20% chance to dodge damaging abilities' },
-  agile:       { name: 'Agile',       desc: '+30% Attack Speed' },
-  regen:       { name: 'Regen',       desc: 'Regenerate 5% max health per second' },
-  unburdened:  { name: 'Unburdened',  desc: '+20% Strength, Agility and Dexterity' },
-  dazed:       { name: 'Dazed',       bad: true, desc: 'Just hit: Ability Speed −10%' },
-  cdfast:      { name: 'Momentum',    desc: 'Cooldowns 20% faster' },
-  cdslow:      { name: 'Sluggish',    bad: true, desc: 'Cooldowns 20% slower' },
-  // instant on application (not lingering on the bar):
-  nausea:      { name: 'Nausea',      bad: true, instant: true, desc: 'A random ready ability immediately goes on cooldown; its bar restarts' },
-  concuss:     { name: 'Concuss',     bad: true, instant: true, desc: 'A random ability\'s bar freezes for the duration' },
+  guilt:       { name: 'Guilt',       kind: 'charge', bad: true, desc: 'Your next X damaging abilities deal half damage' },
+  confusion:   { name: 'Confusion',   kind: 'charge', bad: true, desc: 'Your next X damaging abilities have a 50% chance of damaging yourself instead' },
+  empower:     { name: 'Empowerment', kind: 'charge', desc: 'Your next X damaging abilities also deal additional damage equal to your Piety' },
+  plummet:     { name: 'Plummet',     kind: 'charge', bad: true, desc: 'Receive 50% more damage on the next X damaging hits' },
+  blind:       { name: 'Blind',       kind: 'dur', bad: true, desc: 'Your abilities have 30% reduced chance to hit' },
+  protection:  { name: 'Protection',  kind: 'dur', desc: 'Damage received reduced 25%' },
+  interrupted: { name: 'Interrupted', kind: 'dur', bad: true, desc: 'Ability Speed stops' },
+  intimidated: { name: 'Intimidated', kind: 'dur', bad: true, desc: 'Ability Speed −25%' },
+  terror:      { name: 'Terror',      kind: 'dur', bad: true, desc: 'Ability Speed −50%' },
+  enlarged:    { name: 'Enlarged',    kind: 'dur', desc: '+30% Endurance and Strength' },
+  burdened:    { name: 'Burdened',    kind: 'dur', bad: true, desc: '−20% Strength, Agility and Dexterity' },
+  unburdened:  { name: 'Unburdened',  kind: 'dur', desc: '+20% Strength, Agility and Dexterity' },
+  shrink:      { name: 'Shrink',      kind: 'dur', desc: '20% chance to dodge damaging abilities' },
+  agile:       { name: 'Agile',       kind: 'dur', desc: '+30% Attack Speed' },
+  regen:       { name: 'Regen',       kind: 'dur', desc: 'Regenerate 5% max health per second' },
+  taunt:       { name: 'Taunt',       kind: 'dur', bad: true, desc: 'A random ability gains +50% Ability Speed; the rest get −50%' },
+  flight:      { name: 'Flight',      kind: 'dur', desc: '+50% Ability Speed. Taking 20% max health in damage ends Flight and inflicts Plummet 3' },
+  stealth:     { name: 'Stealth',     kind: 'dur', desc: 'Damaging abilities cannot hit you. Ends when you deal damage' },
+  dazed:       { name: 'Dazed',       kind: 'dur', bad: true, desc: 'Just hit: Ability Speed −10%' },
+  cdfast:      { name: 'Momentum',    kind: 'dur', desc: 'Cooldowns 20% faster' },
+  cdslow:      { name: 'Sluggish',    kind: 'dur', bad: true, desc: 'Cooldowns 20% slower' },
+  latch:       { name: 'Latched',     kind: 'dur', bad: true, desc: 'Whenever you take damage, also receive Bleed 5' },
+  unwavered:   { name: 'Unwavered',   kind: 'dur', desc: 'Flat damage reduction' },
+  repent:      { name: 'Repentance',  kind: 'dur', desc: 'When damaged, reflect 50% of the damage back' },
+  bleed:       { name: 'Bleed',       kind: 'stack', bad: true, desc: 'Take 3 + 0.2×STR damage/s per stack. Activating an ability deals 6 + 0.4×STR per stack, then removes the stack closest to expiring' },
+  frost:       { name: 'Frost',       kind: 'stack', bad: true, desc: 'Ability Speed −10% per stack · hits deal 1 + 0.1×WIS extra per stack. At 10+ stacks: all are removed, dealing 3 + 0.3×WIS each, and you are Interrupted 2s' },
+  poison:      { name: 'Poison',      kind: 'stack', bad: true, desc: 'Health regen stops · lose 1% max health/s, plus 2 + 0.2×DEX damage/s per stack' },
+  mindrot:     { name: 'Mind Rot',    kind: 'stack', bad: true, desc: 'Take 3 + 0.3×INT damage/s and lose that much mana/s per stack. At 0 mana: stacks purge and you lose half your current health' },
+  siphon:      { name: 'Siphon',      kind: 'stack', bad: true, desc: 'Lose 3% max health/s per stack; the inflictor heals the amount drained' },
+  bruised:     { name: 'Bruised',     kind: 'stack', bad: true, desc: 'Skill damage received +50% per stack' },
+  hemorrhage:  { name: 'Hemorrhage',  kind: 'stack', bad: true, desc: 'Take 5 + 0.4×STR damage/s per stack · healing received is halved' },
+  fracture:    { name: 'Fracture',    kind: 'dur', bad: true, desc: 'Whenever you receive skill damage, gain a stack of Bruised 5' },
+  enchant:     { name: 'Enchant',     kind: 'stack', desc: 'Your damaging hits also inflict the enchanted condition' },
+  nausea:      { name: 'Nausea',      kind: 'instant', bad: true, desc: 'A random ready ability immediately goes on cooldown; its bar restarts' },
+  concuss:     { name: 'Concuss',     kind: 'instant', bad: true, desc: 'A random ability\'s bar freezes for the duration' },
 };
 
-// ---- abilities (player unlocks + all authored enemy abilities) ----
-// schema: name, tag(+tag2), cost {stam|mana|reson}, full:[ops]
-//   ops: dmg(base,mult,stat[,stat2],kind,pierce,leech) · heal · shield(overcap?)
-//        st(key,dur|count,to:'self'|'foe'|'both') · dot (legacy draft skills)
-// flags: concept (passive, no bar) · negative · ammo:n (uses per combat)
-//        startCd · firstFree (first early-activation free) · followUp
-//        speedLink:{id,mult} (hasten another of your abilities until it hits)
-//        special:'flee'|'counter' · draft (in tier-1+ draft pool) · noLearn
+// ability-type keywords (Bestiary)
+const TYPE_KEYWORDS = {
+  Skill: 'Costs stamina · fills at Attack Speed (1+AGI/100) · 2s cooldown',
+  Spell: 'Costs mana or resonance · fills at Cast Speed (1+WIS/100) · 3s cooldown',
+  Concept: 'A passive that occupies an ability slot. Some are negative',
+  Ammo: 'Limited uses; when empty, reloads at 5× cooldown',
+  Charge: 'No cooldown while charges remain; recharges at +50% cooldown per charge after the last',
+  Burst: 'Fires its effects an additional time per Burst; cooldown ×(1+Burst)',
+  Sustain: 'Effect persists and the cooldown waits. Taking enough damage ends the Sustain and starts the cooldown',
+  Rally: 'Summons an ally who fights beside you',
+  Initiate: 'Activates automatically at the start of combat (Concepts: once only). Some have bonus effects when initiating',
+  Overcap: 'Shield may exceed its maximum; the excess decays 1% per second',
+};
+
+// ---- abilities ----
+// flags: concept, negative, ammo:n, charge, burst:n, sustain:{...}, rally,
+//        initiate, startCd, followUp, speedLink:{id,mult}, special, draft,
+//        noLearn, sameAs (renamed/upgraded copy for tome de-dupe)
+// ops: dmg(base,mult,stat[,stat2],kind,pierce,leech,recoil) · heal · shield(overcap)
+//      st(key,dur,count,stacks,to) · buff/weaken/dot (legacy)
 const ABILITIES = {
   // ===== Classless =====
   'basic-strike':   { name: 'Basic Strike', tag: 'str', cost: { stam: 3 },
@@ -114,9 +137,11 @@ const ABILITIES = {
   'determination':  { name: 'Determination', tag: 'sol', cost: {}, concept: true,
     desc: 'Increase Soul and Perseverance by 0.2% × highest Classless level reached.' },
 
-  // ===== Tier 0.5 unlocks =====
-  'preemptive-strike': { name: 'Preemptive Strike', tag: 'str', cost: { stam: 4 }, firstFree: true,
-    desc: 'First activation each combat skips the stamina cost.',
+  // ===== Tier 0.5 =====
+  'preemptive-strike': { name: 'Preemptive Strike', tag: 'str', cost: { stam: 4 }, initiate: true,
+    desc: 'Initiate: fires at combat start, inflicting Interrupted 1 and dealing double damage.',
+    initOps: [{ t: 'st', key: 'interrupted', dur: 1, to: 'foe' }],
+    initDmgMult: 2,
     full: [{ t: 'dmg', base: 5, mult: 0.7, stat: 'str', kind: 'phys' }] },
   'remove-weights': { name: 'Remove Training Weights', tag: 'end', cost: { stam: 12 },
     full: [{ t: 'st', key: 'unburdened', dur: 5, to: 'self' }] },
@@ -143,8 +168,52 @@ const ABILITIES = {
   'watched-over':   { name: 'Watched Over', tag: 'fai', cost: {}, concept: true,
     desc: 'Your Faith is added to your maximum health.' },
 
-  // ===== Book 1 enemy abilities (learnable via Tomes unless noLearn) =====
-  // Chapter 1
+  // ===== Tier 1 class tracks =====
+  'crushing-blow':  { name: 'Crushing Blow', tag: 'end', cost: { stam: 10 },
+    full: [{ t: 'st', key: 'bruised', dur: 3, to: 'foe' },
+           { t: 'dmg', base: 20, mult: 3, stat: 'end', kind: 'phys' }] },
+  'extremity-strike': { name: 'Extremity Strike', tag: 'str', cost: { stam: 8 },
+    full: [{ t: 'st', key: 'fracture', dur: 2, to: 'foe' },
+           { t: 'dmg', base: 10, mult: 1.5, stat: 'str', kind: 'phys' }] },
+  'guard-breaker':  { name: 'Guard Breaker', tag: 'str', cost: {}, concept: true,
+    desc: 'Whenever the enemy\'s mana shield is fully depleted, inflict Interrupted 2 and Bleed 3.' },
+  'smoke-bomb':     { name: 'Smoke Bomb', tag: 'agi', cost: { stam: 6 },
+    full: [{ t: 'st', key: 'blind', dur: 3, to: 'foe' }, { t: 'st', key: 'interrupted', dur: 1, to: 'foe' }] },
+  'poison-enchant': { name: 'Poison Enchant', tag: 'dex', cost: { stam: 12 },
+    full: [{ t: 'st', key: 'enchant', dur: 10, to: 'self', enchKey: 'poison', enchDur: 3 }] },
+  'deadly-ambush':  { name: 'Deadly Ambush', tag: 'dex', tag2: 'agi', cost: {}, concept: true, initiate: true,
+    desc: 'Initiate: at the start of combat, inflict Poison 3 and deal 15 + 2 × (DEX + AGI) damage.',
+    initOps: [{ t: 'st', key: 'poison', dur: 3, to: 'foe' },
+              { t: 'dmg', base: 15, mult: 2, stat: 'dex', stat2: 'agi', kind: 'phys' }] },
+  'bounty-hunter':  { name: 'Bounty Hunter', tag: 'dex', cost: { stam: 12 }, special: 'bounty',
+    desc: 'If this deals the finishing blow, gain extra gold equal to the overkill.',
+    full: [{ t: 'dmg', base: 20, mult: 3, stat: 'dex', kind: 'phys' }] },
+  'trick-blade':    { name: 'Trick Blade', tag: 'dex', cost: { stam: 8 }, ammo: 1,
+    full: [{ t: 'st', key: 'bleed', dur: 3, to: 'foe' },
+           { t: 'dmg', base: 40, mult: 4, stat: 'dex', kind: 'phys' }] },
+  'battle-conscious': { name: 'Battle Conscious', tag: 'end', cost: {}, concept: true,
+    desc: 'Attack Speed cannot drop below 100% unless Interrupted.' },
+  'double-twin-fist': { name: 'Double Twin Fist', tag: 'str', cost: { stam: 9 }, charge: true, ammo: 2, burst: 1,
+    full: [{ t: 'dmg', base: 14, mult: 2, stat: 'str', kind: 'phys' }] },
+  'cleanse':        { name: 'Cleanse', tag: 'pie', cost: { reson: 5 }, special: 'cleanse',
+    desc: 'Remove a debuff and gain Regen 3.',
+    full: [{ t: 'st', key: 'regen', dur: 3, to: 'self' }] },
+  'in-the-name-of': { name: 'In The Name Of...', tag: 'pie', cost: {}, concept: true,
+    desc: 'Gain 1 Empowerment every 2 seconds. Resonance does not regenerate.' },
+  'magic-missile':  { name: 'Magic Missile', tag: 'int', cost: { mana: 5 }, charge: true, ammo: 3,
+    full: [{ t: 'dmg', base: 31, mult: 1.6, stat: 'int', kind: 'mag' }] },
+  'arcane-blast':   { name: 'Arcane Blast', tag: 'int', tag2: 'wis', cost: { mana: 15 }, ammo: 1,
+    full: [{ t: 'dmg', base: 80, mult: 2.5, stat: 'int', stat2: 'wis', kind: 'mag' }] },
+  'arcane-crafted': { name: 'Arcane Crafted', tag: 'int', cost: {}, concept: true,
+    desc: 'Spells that complete their full cast time deal 50% more damage.' },
+  'unwavered-spell':{ name: 'Unwavered', tag: 'fai', cost: { reson: 20 },
+    full: [{ t: 'st', key: 'unwavered', dur: 20, to: 'self', valBase: 2, valMult: 0.1, valStat: 'fai' }] },
+  'repent-evil':    { name: 'Repent Evil', tag: 'fai', cost: { reson: 30 },
+    full: [{ t: 'st', key: 'repent', dur: 12, to: 'self' }] },
+  'holier-than-thou': { name: 'Holier Than Thou', tag: 'fai', cost: {}, concept: true,
+    desc: 'While Resonance is full, deal damage/s equal to your Resonance regen. Casting a Faith spell multiplies Resonance regen by 1.5.' },
+
+  // ===== Book 1 enemy abilities =====
   'stare-menacingly': { name: 'Stare Menacingly', tag: 'end', cost: { stam: 6 },
     full: [{ t: 'st', key: 'interrupted', dur: 1, to: 'foe' }] },
   'intimidating-demeanor': { name: 'Intimidating Demeanor', tag: 'end', cost: { stam: 10 },
@@ -157,7 +226,6 @@ const ABILITIES = {
     full: [{ t: 'dmg', base: 5, mult: 1, stat: 'str', kind: 'phys' }] },
   'right-fist':     { name: 'Right Fist', tag: 'str', cost: { stam: 2 }, startCd: true,
     full: [{ t: 'dmg', base: 10, mult: 1, stat: 'str', kind: 'phys' }] },
-  // Chapter 2
   'weak-swing':     { name: 'Weak Swing', tag: 'str', cost: { stam: 3 },
     full: [{ t: 'dmg', base: 5, mult: 1.1, stat: 'str', kind: 'phys' }] },
   'drop-shield':    { name: 'Drop Shield', tag: 'end', cost: { stam: 4 },
@@ -172,14 +240,13 @@ const ABILITIES = {
     full: [{ t: 'st', key: 'concuss', dur: 3, to: 'foe' },
            { t: 'dmg', base: 20, mult: 1.5, stat: 'str', kind: 'phys' }] },
   'back-in-my-day': { name: 'Back in my Day..', tag: 'wis', cost: { mana: 8 },
-    full: [{ t: 'st', key: 'intimidated', dur: 3, to: 'foe' }] }, // authored fill-in: a long boring story
+    full: [{ t: 'st', key: 'intimidated', dur: 3, to: 'foe' }] },
   'where-am-i':     { name: 'Where am I??', tag: 'wis', cost: { mana: 10 },
     full: [{ t: 'st', key: 'confusion', count: 1, to: 'both' }] },
   'shuffle':        { name: 'Shuffle', tag: 'agi', cost: { stam: 6 },
     full: [{ t: 'st', key: 'agile', dur: 4, to: 'self' }] },
   'cane-swipe':     { name: 'Cane Swipes', tag: 'dex', cost: { stam: 3 }, ammo: 3, charge: true,
     full: [{ t: 'dmg', base: 4, mult: 1.1, stat: 'dex', kind: 'phys' }] },
-  // Chapter 3
   'twin-strike':    { name: 'Twin Strike', tag: 'dex', cost: { stam: 5 },
     full: [{ t: 'dmg', base: 3, mult: 1.1, stat: 'dex', kind: 'phys' },
            { t: 'dmg', base: 3, mult: 1.1, stat: 'dex', kind: 'phys' }] },
@@ -204,7 +271,6 @@ const ABILITIES = {
     full: [] },
   'glacial-fist':   { name: 'Glacial Fist', tag: 'str', tag2: 'int', cost: { stam: 8 },
     full: [{ t: 'dmg', base: 12, mult: 1, stat: 'str', stat2: 'int', kind: 'phys' }] },
-  // Chapter 4
   'be-adorable':    { name: 'Be Adorable', tag: 'wis', cost: { mana: 3 },
     full: [{ t: 'st', key: 'guilt', count: 1, to: 'foe' }] },
   'knaw':           { name: 'Knaw', tag: 'str', cost: { stam: 2 },
@@ -227,7 +293,6 @@ const ABILITIES = {
     full: [{ t: 'st', key: 'intimidated', dur: 4, to: 'foe' }] },
   'putrid-smell':   { name: 'Putrid Smell', tag: 'end', cost: { stam: 6 },
     full: [{ t: 'st', key: 'nausea', dur: 4, to: 'foe' }] },
-  // Chapter 5
   'rebound':        { name: 'Rebound', tag: 'agi', cost: {}, concept: true,
     desc: 'Agility skills have no cooldown.' },
   'gunk-shot':      { name: 'Gunk Shot', tag: 'end', cost: { stam: 8 },
@@ -245,7 +310,6 @@ const ABILITIES = {
     full: [{ t: 'dmg', base: 5, mult: 1.3, stat: 'dex', kind: 'phys' }] },
   'rock-throw':     { name: 'Rock Throw', tag: 'str', cost: { stam: 3 },
     full: [{ t: 'dmg', base: 1, mult: 1.2, stat: 'str', kind: 'phys' }] },
-  // Book boss
   'knee-in-groin':  { name: 'Knee in Groin', tag: 'str', cost: { stam: 2 },
     full: [{ t: 'st', key: 'interrupted', dur: 2, to: 'foe' },
            { t: 'dmg', base: 10, mult: 1.3, stat: 'str', kind: 'phys' }] },
@@ -264,13 +328,207 @@ const ABILITIES = {
   'whats-uhh':      { name: 'What\'s uhh..', tag: 'wis', cost: { mana: 20 },
     full: [{ t: 'st', key: 'confusion', count: 5, to: 'self' }] },
 
-  // ===== legacy draftable skills (tier 1+ classes still draft at 1/10/100) =====
+  // ===== Book 2 Chapter 1 =====
+  'halt':           { name: 'Halt!', tag: 'wis', cost: { mana: 5 },
+    full: [{ t: 'st', key: 'interrupted', dur: 2, to: 'foe' }] },
+  'present-papers': { name: 'Present Your Papers!', tag: 'wis', cost: { mana: 6 },
+    full: [{ t: 'st', key: 'confusion', count: 3, to: 'foe' }] },
+  'back-of-line':   { name: 'Back Of The Line!', tag: 'str', cost: { stam: 7 },
+    full: [{ t: 'st', key: 'intimidated', dur: 2, to: 'foe' }, { t: 'st', key: 'concuss', dur: 1, to: 'foe' },
+           { t: 'dmg', base: 10, mult: 2, stat: 'str', kind: 'phys' }] },
+  'pay-the-fine':   { name: 'Pay The Fine!', tag: 'end', cost: { stam: 5 },
+    full: [{ t: 'st', key: 'guilt', count: 2, to: 'foe' }, { t: 'st', key: 'bleed', dur: 5, stacks: 2, to: 'foe' }] },
+  'disrespect-toll':{ name: 'Disrespect My Toll?!', tag: 'pie', cost: { reson: 6 },
+    full: [{ t: 'st', key: 'empower', count: 2, to: 'self' }] },
+  'deals-to-die-for': { name: 'These Deals Are To Die For!', tag: 'int', cost: { mana: 6 },
+    full: [{ t: 'st', key: 'siphon', dur: 5, to: 'foe' }] },
+  'special-recipe': { name: 'My Special Recipe, You Must Try!', tag: 'dex', cost: { stam: 5 },
+    full: [{ t: 'st', key: 'poison', dur: 8, to: 'foe' }, { t: 'st', key: 'nausea', dur: 2, to: 'foe' },
+           { t: 'dmg', base: 8, mult: 1.5, stat: 'dex', kind: 'phys' }] },
+  'supposed-sharp': { name: 'It\'s Supposed To Be Sharp!', tag: 'end', cost: { stam: 7 },
+    full: [{ t: 'st', key: 'bleed', dur: 6, to: 'foe' }] },
+  'dont-be-picky':  { name: 'Don\'t Be So Picky!', tag: 'str', cost: { stam: 4 },
+    full: [{ t: 'st', key: 'intimidated', dur: 4, to: 'foe' }, { t: 'st', key: 'guilt', count: 2, to: 'foe' }] },
+  'one-for-two':    { name: 'We Have a 1 for 2 Deal Right Now!', tag: 'int', cost: { mana: 10 },
+    full: [{ t: 'st', key: 'confusion', count: 4, to: 'foe' }, { t: 'st', key: 'mindrot', dur: 4, to: 'foe' }] },
+  'hand-over-coin': { name: 'Hand Over The Coin, Bud!', tag: 'str', cost: { stam: 4 },
+    full: [{ t: 'st', key: 'intimidated', dur: 5, to: 'foe' },
+           { t: 'dmg', base: 12, mult: 1.7, stat: 'str', kind: 'phys' }] },
+  'swiping-slash':  { name: 'Swiping Slash', tag: 'dex', cost: { stam: 3 }, ammo: 2, charge: true,
+    full: [{ t: 'dmg', base: 12, mult: 1.5, stat: 'dex', kind: 'phys' }] },
+  'guys-broke':     { name: 'Hey, This Guy\'s Broke!', tag: 'wis', cost: { mana: 8 },
+    full: [{ t: 'st', key: 'taunt', dur: 5, to: 'foe' }] },
+  'skidaddle':      { name: 'Skidaddle', tag: 'agi', cost: { stam: 30 }, special: 'flee', noLearn: true, sameAs: 'flee',
+    desc: 'Combat ends. No victory, no drops, no XP.', full: [] },
+
+  // ===== Book 2 Chapter 2 =====
+  'viper-strike-u': { name: 'Viper Strike {U}', tag: 'agi', cost: { stam: 2 }, burst: 1, sameAs: 'viper-strike',
+    full: [{ t: 'st', key: 'poison', dur: 2, to: 'foe' },
+           { t: 'dmg', base: 5, mult: 1.3, stat: 'agi', kind: 'phys' }] },
+  'poison-daggers-u': { name: 'Poison Daggers {U}', tag: 'dex', cost: { stam: 4 }, ammo: 3, sameAs: 'poison-dagger',
+    full: [{ t: 'st', key: 'poison', dur: 3, to: 'foe' },
+           { t: 'dmg', base: 5, mult: 1, stat: 'dex', kind: 'phys' }] },
+  'bolas-toss':     { name: 'Bolas Toss', tag: 'dex', cost: { stam: 8 },
+    full: [{ t: 'st', key: 'burdened', dur: 5, to: 'foe' },
+           { t: 'dmg', base: 5, mult: 1.5, stat: 'agi', kind: 'phys' }] },
+  'spear-throw':    { name: 'Spear Throw', tag: 'dex', cost: { stam: 8 },
+    full: [{ t: 'st', key: 'bleed', dur: 4, to: 'foe' },
+           { t: 'dmg', base: 8, mult: 1.5, stat: 'dex', kind: 'phys' }] },
+  'deflecting-stance': { name: 'Deflecting Stance', tag: 'dex', cost: { stam: 4 },
+    full: [{ t: 'st', key: 'protection', dur: 4, to: 'self' }, { t: 'st', key: 'shrink', dur: 4, to: 'self' }] },
+  'arterial-strike':{ name: 'Arterial Strike', tag: 'agi', cost: { stam: 7 },
+    full: [{ t: 'st', key: 'bleed', dur: 8, to: 'foe' },
+           { t: 'dmg', base: 7, mult: 1.4, stat: 'agi', kind: 'phys' }] },
+  'jab-flurry':     { name: 'Jab Flurry', tag: 'dex', cost: { stam: 9 }, burst: 3,
+    full: [{ t: 'dmg', base: 8, mult: 1.1, stat: 'dex', kind: 'phys' }] },
+  'sonic-assault':  { name: 'Sonic Assault', tag: 'agi', tag2: 'dex', cost: { stam: 12 }, special: 'sonic',
+    desc: 'Your highest stamina-cost ability gains Burst +1 for the rest of combat.',
+    full: [] },
+  'whirlwind-slash-b2': { name: 'Whirlwind Slash', tag: 'str', cost: { stam: 2 }, ammo: 4, sameAs: 'whirlwind-slash',
+    full: [{ t: 'dmg', base: 1, mult: 1.1, stat: 'str', kind: 'phys' }] },
+  'icicle-darts-u': { name: 'Icicle Darts {U}', tag: 'int', cost: { mana: 3 }, ammo: 4, sameAs: 'icicle-darts',
+    full: [{ t: 'st', key: 'frost', dur: 3, to: 'foe' },
+           { t: 'dmg', base: 4, mult: 1.2, stat: 'int', kind: 'mag' }] },
+  'glacial-fist-u': { name: 'Glacial Fist {U}', tag: 'str', tag2: 'int', cost: { stam: 7 }, sameAs: 'glacial-fist',
+    full: [{ t: 'st', key: 'frost', dur: 10, to: 'foe' },
+           { t: 'dmg', base: 13, mult: 1.2, stat: 'str', stat2: 'int', kind: 'phys' }] },
+  'frost-enchant':  { name: 'Frost Enchant', tag: 'int', cost: { mana: 14 },
+    full: [{ t: 'st', key: 'enchant', dur: 30, to: 'self', enchKey: 'frost', enchDur: 5 }] },
+
+  // ===== Book 2 Chapter 3 =====
+  'hum-in-unison':  { name: 'Hum in Unison', tag: 'end', cost: { stam: 8 }, sameAs: 'vibrate',
+    full: [{ t: 'st', key: 'regen', dur: 6, to: 'self' }] },
+  'multiply':       { name: 'Multiply', tag: 'wis', cost: { mana: 40 }, rally: true,
+    desc: 'An ally of this combat joins the fight. Mana cost doubles for the rest of combat.',
+    full: [] },
+  'gunk-bombardment': { name: 'Gunk Bombardment', tag: 'end', cost: { stam: 9 },
+    full: [{ t: 'st', key: 'interrupted', dur: 2, to: 'foe' },
+           { t: 'dmg', base: 20, mult: 1.7, stat: 'end', kind: 'phys' }] },
+  'roar':           { name: 'Roar', tag: 'end', cost: { stam: 8 },
+    full: [{ t: 'st', key: 'burdened', dur: 5, to: 'foe' }, { t: 'st', key: 'intimidated', dur: 5, to: 'foe' },
+           { t: 'st', key: 'empower', count: 1, to: 'self' }] },
+  'full-bore':      { name: 'Full Bore', tag: 'str', cost: { stam: 10 },
+    full: [{ t: 'st', key: 'bruised', dur: 8, to: 'foe' },
+           { t: 'dmg', base: 20, mult: 3, stat: 'str', kind: 'phys', recoil: 0.5 }] },
+  'after-image':    { name: 'After Image', tag: 'agi', cost: { stam: 9 },
+    full: [{ t: 'st', key: 'agile', dur: 5, to: 'self' }, { t: 'st', key: 'shrink', dur: 5, to: 'self' }] },
+  'carotid-crunch': { name: 'Carotid Crunch', tag: 'str', cost: { stam: 12 },
+    full: [{ t: 'st', key: 'hemorrhage', dur: 5, to: 'foe' },
+           { t: 'dmg', base: 18, mult: 2, stat: 'str', kind: 'phys' }] },
+  'camouflage':     { name: 'Camouflage', tag: 'agi', cost: { stam: 8 },
+    full: [{ t: 'st', key: 'stealth', dur: 10, to: 'self' }] },
+  'mandible-crunch':{ name: 'Mandible Crunch', tag: 'str', cost: { stam: 12 },
+    full: [{ t: 'st', key: 'fracture', dur: 5, to: 'foe' },
+           { t: 'dmg', base: 10, mult: 2, stat: 'str', kind: 'phys' }] },
+  'take-flight':    { name: 'Take Flight', tag: 'end', cost: { stam: 14 },
+    full: [{ t: 'st', key: 'flight', dur: 8, to: 'self' }] },
+  'flanking-strike':{ name: 'Flanking Strike', tag: 'agi', cost: { stam: 12 }, burst: 1,
+    full: [{ t: 'dmg', base: 5, mult: 1.3, stat: 'agi', kind: 'phys' }] },
+  'howl':           { name: 'Howl', tag: 'wis', cost: { mana: 40 }, rally: true, ammo: 2,
+    desc: 'An ally of this combat joins the fight. Mana cost doubles for the rest of combat.',
+    full: [] },
+  'pounce':         { name: 'Pounce', tag: 'agi', cost: { stam: 3 }, sameAs: 'jump-attack',
+    full: [{ t: 'dmg', base: 5, mult: 1.1, stat: 'agi', kind: 'phys' }] },
+  'latching-bite':  { name: 'Latching Bite', tag: 'str', cost: { stam: 10 },
+    full: [{ t: 'st', key: 'latch', dur: 10, to: 'foe' }] },
+
+  // ===== Book 2 Chapter 4 =====
+  'ambush':         { name: 'Ambush', tag: 'dex', cost: {}, concept: true, initiate: true,
+    desc: 'Initiate: at the start of combat, deal 8 + 1.5 × Dexterity damage and inflict Bleed 3.',
+    initOps: [{ t: 'st', key: 'bleed', dur: 3, to: 'foe' },
+              { t: 'dmg', base: 8, mult: 1.5, stat: 'dex', kind: 'phys' }] },
+  'rope-snag':      { name: 'Rope Snag Trap', tag: 'dex', cost: { stam: 6 },
+    full: [{ t: 'st', key: 'burdened', dur: 5, to: 'foe' }, { t: 'st', key: 'confusion', count: 1, to: 'foe' }] },
+  'sedation-dart':  { name: 'Sedation Dart', tag: 'dex', cost: { stam: 7 }, ammo: 2,
+    full: [{ t: 'st', key: 'nausea', dur: 2, to: 'foe' }, { t: 'st', key: 'poison', dur: 12, to: 'foe' },
+           { t: 'dmg', base: 1, mult: 1.1, stat: 'dex', kind: 'phys' }] },
+  'bone-knife':     { name: 'Bone Knife Swipe', tag: 'dex', cost: { stam: 8 },
+    full: [{ t: 'st', key: 'bleed', dur: 8, to: 'foe' },
+           { t: 'dmg', base: 20, mult: 2, stat: 'dex', kind: 'phys' }] },
+  'leg-shot':       { name: 'Leg Shot', tag: 'dex', cost: { stam: 5 }, ammo: 3,
+    full: [{ t: 'dmg', base: 5, mult: 1.5, stat: 'dex', kind: 'phys' }] },
+  'scatter-shot':   { name: 'Scatter Shot', tag: 'dex', cost: { stam: 12 }, burst: 2,
+    full: [{ t: 'dmg', base: 5, mult: 1.5, stat: 'dex', kind: 'phys' }] },
+  'between-eyes':   { name: 'Right Between the Eyes', tag: 'dex', cost: { stam: 20 }, ammo: 1,
+    full: [{ t: 'st', key: 'concuss', dur: 5, to: 'foe' },
+           { t: 'dmg', base: 20, mult: 2.5, stat: 'dex', kind: 'phys' }] },
+  'shield-bash':    { name: 'Shield Bash', tag: 'end', cost: { stam: 4 },
+    full: [{ t: 'st', key: 'concuss', dur: 2, to: 'foe' },
+           { t: 'dmg', base: 4, mult: 1.2, stat: 'end', kind: 'phys' }] },
+  'fortified':      { name: 'Fortified', tag: 'end', cost: { stam: 7 },
+    full: [{ t: 'st', key: 'protection', dur: 5, to: 'self' }, { t: 'st', key: 'empower', count: 1, to: 'self' }] },
+  'simultaneous-slash': { name: 'Simultaneous Slash', tag: 'dex', cost: { stam: 8 }, burst: 1,
+    full: [{ t: 'dmg', base: 10, mult: 1.6, stat: 'dex', kind: 'phys' }] },
+  'panic':          { name: 'Panic', tag: 'wis', cost: {}, concept: true, negative: true, noLearn: true,
+    desc: 'Once at or below 50% health: gain Agile and Confusion for the rest of combat.' },
+  'swing-wildly':   { name: 'Swing Wildly', tag: 'str', cost: { stam: 6 }, ammo: 4, charge: true,
+    full: [{ t: 'dmg', base: 10, mult: 1.8, stat: 'str', kind: 'phys' }] },
+  'war-cry-hob':    { name: 'War Cry', tag: 'end', cost: { stam: 10 },
+    full: [{ t: 'st', key: 'intimidated', dur: 6, to: 'foe' }, { t: 'st', key: 'interrupted', dur: 1, to: 'foe' },
+           { t: 'st', key: 'enlarged', dur: 5, to: 'self' }] },
+  'berserk':        { name: 'Berserk', tag: 'str', cost: {}, concept: true,
+    desc: 'Deal 40% more damage · receive 20% more damage.' },
+  'knee-in-groin-u':{ name: 'Knee in Groin {U}', tag: 'str', cost: { stam: 2 }, sameAs: 'knee-in-groin',
+    full: [{ t: 'st', key: 'interrupted', dur: 2, to: 'foe' },
+           { t: 'dmg', base: 12, mult: 1.5, stat: 'str', kind: 'phys' }] },
+  'bonk-on-head-u': { name: 'Bonk on Head {U}', tag: 'str', cost: { stam: 2 }, startCd: true, sameAs: 'bonk-on-head',
+    full: [{ t: 'st', key: 'concuss', dur: 2, to: 'foe' },
+           { t: 'dmg', base: 12, mult: 1.5, stat: 'str', kind: 'phys' }] },
+  'wack-u':         { name: 'Wack {U}', tag: 'str', cost: { stam: 5 }, speedLink: { id: 'thwack-u', mult: 2.5 }, sameAs: 'wack',
+    desc: 'Hastens Thwack: +150% Attack Speed until it deals damage.',
+    full: [{ t: 'dmg', base: 6, mult: 1.6, stat: 'str', kind: 'phys' }] },
+  'thwack-u':       { name: 'Thwack {U}', tag: 'str', cost: { stam: 10 }, speedLink: { id: 'crack-u', mult: 2.5 }, sameAs: 'thwack',
+    desc: 'Hastens Crack!: +150% Attack Speed until it deals damage.',
+    full: [{ t: 'dmg', base: 11, mult: 2.1, stat: 'str', kind: 'phys' }] },
+  'crack-u':        { name: 'Crack! {U}', tag: 'str', cost: { stam: 20 }, sameAs: 'crack',
+    full: [{ t: 'st', key: 'bruised', dur: 10, to: 'foe' },
+           { t: 'dmg', base: 40, mult: 2.6, stat: 'str', kind: 'phys' }] },
+  'whats-that':     { name: 'What\'s That Over There!', tag: 'wis', cost: { mana: 5 },
+    full: [{ t: 'st', key: 'interrupted', dur: 1, to: 'foe' }, { t: 'st', key: 'empower', count: 1, to: 'self' }] },
+
+  // ===== Book 2 Chapter 5 =====
+  'yelp':           { name: 'Yelp', tag: 'wis', cost: { mana: 5 },
+    full: [{ t: 'st', key: 'guilt', count: 1, to: 'foe' }, { t: 'st', key: 'shrink', dur: 3, to: 'self' }] },
+  'bite':           { name: 'Bite', tag: 'str', cost: { stam: 3 },
+    full: [{ t: 'st', key: 'bleed', dur: 2, to: 'foe' },
+           { t: 'dmg', base: 5, mult: 1.4, stat: 'str', kind: 'phys' }] },
+  'nothingness':    { name: 'Nothingness', tag: 'sol', cost: {}, concept: true, negative: true, noLearn: true,
+    desc: 'There is no fight here. You cannot perform any abilities.' },
+  'too-quiet':      { name: 'It\'s too quiet...', tag: 'sol', cost: { stam: 10 }, noLearn: true, full: [] },
+  'something-wrong':{ name: 'Something is wrong...', tag: 'sol', cost: { stam: 15 }, noLearn: true, full: [] },
+  'neck-hairs':     { name: 'The hairs on your neck stand up', tag: 'sol', cost: { stam: 20 }, noLearn: true, full: [] },
+  'not-supposed':   { name: 'YOU ARE NOT SUPPOSED TO BE HERE', tag: 'sol', cost: { stam: 30 }, special: 'endwin', noLearn: true,
+    desc: 'Combat ends in 3 seconds. No rewards, but the victory counts.', full: [] },
+  'have-to-run':    { name: 'You Have To Run!', tag: 'sol', cost: { stam: 15 }, noLearn: true, full: [] },
+  'not-normal':     { name: 'That Thing Is Not Normal!', tag: 'sol', cost: { stam: 30 }, noLearn: true, full: [] },
+  'slow-it-down':   { name: 'He Said He Would Slow It Down...', tag: 'sol', cost: { stam: 45 }, noLearn: true, full: [] },
+  'just-leave-him': { name: 'But Can I Just Leave Him?', tag: 'sol', cost: { stam: 60 }, special: 'endwin', noLearn: true,
+    desc: 'Combat ends in 3 seconds. No rewards, but the victory counts.', full: [] },
+
+  // ===== Book 2 boss =====
+  'ferocious-howl': { name: 'Ferocious Howl', tag: 'wis', cost: { mana: 8 },
+    full: [{ t: 'st', key: 'terror', dur: 3, to: 'foe' }, { t: 'st', key: 'interrupted', dur: 1, to: 'foe' }] },
+  'hatred-brews':   { name: 'Hatred Brews', tag: 'sol', cost: { mana: 10 }, special: 'hatred',
+    desc: 'Increase all core stats by 10 for the combat. Stackable.',
+    full: [] },
+  'coagulated-claws': { name: 'Coagulated Claws', tag: 'dex', cost: { stam: 7 }, ammo: 2, charge: true,
+    full: [{ t: 'st', key: 'bleed', dur: 5, to: 'foe' }, { t: 'st', key: 'poison', dur: 5, to: 'foe' },
+           { t: 'dmg', base: 15, mult: 1.2, stat: 'dex', kind: 'phys' }] },
+  'relentless-assault': { name: 'Relentless Assault', tag: 'str', cost: { stam: 9 }, burst: 2,
+    full: [{ t: 'st', key: 'bleed', dur: 7, to: 'foe' }, { t: 'st', key: 'poison', dur: 7, to: 'foe' },
+           { t: 'dmg', base: 20, mult: 1.3, stat: 'str', kind: 'phys' }] },
+  'decisive-lunge': { name: 'Decisive Lunge', tag: 'agi', cost: { stam: 7 },
+    full: [{ t: 'st', key: 'agile', dur: 3, to: 'self' },
+           { t: 'dmg', base: 12, mult: 1.9, stat: 'agi', kind: 'phys' }] },
+  'feast':          { name: 'Feast', tag: 'end', cost: { stam: 15 }, sustain: { thresholdPct: 0.10 },
+    desc: 'Sustain: gain Regen while sustaining. Taking 10% max health in damage ends the Sustain.',
+    full: [] },
+
+  // ===== legacy draft pool (tier 1.5 drafts; can also include tome abilities) =====
   'slash':        { name: 'Slash', tag: 'str', cost: { stam: 5 }, draft: true,
     full: [{ t: 'dmg', base: 6, mult: 1.4, stat: 'str', kind: 'phys' }] },
   'heavy-blow':   { name: 'Heavy Blow', tag: 'str', cost: { stam: 9 }, draft: true,
     full: [{ t: 'dmg', base: 12, mult: 2.0, stat: 'str', kind: 'phys' }] },
-  'rend':         { name: 'Rend', tag: 'str', cost: { stam: 6 }, draft: true,
-    full: [{ t: 'dot', base: 3, mult: 0.6, stat: 'str', secs: 4, kind: 'phys', label: 'Bleed' }] },
   'shield-wall':  { name: 'Shield Wall', tag: 'end', cost: { stam: 6 }, draft: true,
     full: [{ t: 'shield', base: 8, mult: 2.0, stat: 'end' }] },
   'pierce':       { name: 'Pierce', tag: 'dex', cost: { stam: 5 }, draft: true,
@@ -293,15 +551,20 @@ const ABILITIES = {
     full: [{ t: 'dmg', base: 9, mult: 1.6, stat: 'sol', kind: 'mag' }] },
 };
 const SKILL_OR_BASIC = (id) => ABILITIES[id];
-const SKILLS = ABILITIES; // legacy alias
+const SKILLS = ABILITIES;
+
+// reverse-combat thematic names by stat tag
+const REVERSE_NAMES = {
+  str: 'Apply Pressure', end: 'Tear Fabric To Slow Bleed', dex: 'Give Chewing Herb',
+  agi: 'Apply a Salve', int: 'Elevate The Wound', wis: 'Inspect Severity',
+  pie: 'Healing Words', fai: 'Offer Prayer', sol: 'It Is Not Time Yet',
+};
 
 // ---- class tree ----
-// unlocks: abilities granted at class level 1/10/100 (auto-equip when possible).
-// Classes WITHOUT an unlocks table still trigger a 3-skill draft at 1/10/100.
 const CLASSES = {
   classless: {
     name: 'Classless', tier: 0, core: [], parents: [], unlock: [],
-    baseXp: 10, flatStep: 5, xpMult: 1.025, // (10 + 5·(L−1)) × 1.025^(L−1)
+    baseXp: 10, flatStep: 5, xpMult: 1.025,
     unlocks: {
       1: ['basic-strike', 'follow-up-slash', 'magic-pebble', 'protection'],
       10: ['body-bash', 'leaping-strike', 'obscure-vision', 'empowerment'],
@@ -314,8 +577,6 @@ const CLASSES = {
       { everyN: 8, add: { sol: 1 } },
     ],
   },
-
-  // ---- Tier 0.5 ----
   'squire-trainee': {
     name: 'Squire Trainee', tier: 0.5, core: ['str', 'end'],
     parents: ['classless'], unlock: [{ class: 'classless', level: 30 }],
@@ -364,12 +625,11 @@ const CLASSES = {
       { everyN: 8, add: { sol: 1 } },
     ],
   },
-
-  // ---- Tier 1 (draft-based unlocks) ----
   fighter: {
     name: 'Fighter', tier: 1, core: ['str', 'end'],
     parents: ['squire-trainee'], unlock: [{ class: 'squire-trainee', level: 40 }],
     baseXp: 1000, xpMult: 1.1,
+    unlocks: { 1: ['crushing-blow'], 10: ['extremity-strike'], 100: ['guard-breaker'] },
     gains: [
       { everyN: 4, add: { str: 2, end: 2 } },
       { everyN: 5, add: { dex: 1, agi: 1, str: 1, end: 1 } },
@@ -381,6 +641,7 @@ const CLASSES = {
     name: 'Rogue', tier: 1, core: ['dex', 'agi'],
     parents: ['scouts-runner'], unlock: [{ class: 'scouts-runner', level: 40 }],
     baseXp: 1000, xpMult: 1.1,
+    unlocks: { 1: ['smoke-bomb'], 10: ['poison-enchant'], 100: ['deadly-ambush'] },
     gains: [
       { everyN: 4, add: { dex: 2, agi: 2 } },
       { everyN: 5, add: { dex: 1, agi: 1, str: 1, end: 1 } },
@@ -393,6 +654,7 @@ const CLASSES = {
     parents: ['squire-trainee', 'scouts-runner'],
     unlock: [{ class: 'squire-trainee', level: 25 }, { class: 'scouts-runner', level: 25 }],
     baseXp: 1000, xpMult: 1.1,
+    unlocks: { 1: ['bounty-hunter'], 10: ['trick-blade'], 100: ['battle-conscious'] },
     gains: [
       { everyN: 4, add: { dex: 2, end: 2 } },
       { everyN: 5, add: { str: 1, end: 1, dex: 1, agi: 1 } },
@@ -405,6 +667,7 @@ const CLASSES = {
     parents: ['squire-trainee', 'assistant-scribe'],
     unlock: [{ class: 'squire-trainee', level: 25 }, { class: 'assistant-scribe', level: 25 }],
     baseXp: 1000, xpMult: 1.1,
+    unlocks: { 1: ['double-twin-fist'], 10: ['cleanse'], 100: ['in-the-name-of'] },
     gains: [
       { everyN: 4, add: { pie: 2, str: 2 } },
       { everyN: 5, add: { fai: 1, pie: 1, str: 1, end: 1 } },
@@ -416,6 +679,7 @@ const CLASSES = {
     name: 'Mage', tier: 1, core: ['int', 'wis'],
     parents: ['mages-apprentice'], unlock: [{ class: 'mages-apprentice', level: 40 }],
     baseXp: 1000, xpMult: 1.1,
+    unlocks: { 1: ['magic-missile'], 10: ['arcane-blast'], 100: ['arcane-crafted'] },
     gains: [
       { everyN: 4, add: { int: 2, wis: 2 } },
       { everyN: 5, add: { fai: 1, pie: 1, int: 1, wis: 1 } },
@@ -427,6 +691,7 @@ const CLASSES = {
     name: 'Deacon', tier: 1, core: ['pie', 'fai'],
     parents: ['assistant-scribe'], unlock: [{ class: 'assistant-scribe', level: 40 }],
     baseXp: 1000, xpMult: 1.1,
+    unlocks: { 1: ['unwavered-spell'], 10: ['repent-evil'], 100: ['holier-than-thou'] },
     gains: [
       { everyN: 4, add: { pie: 2, fai: 2 } },
       { everyN: 5, add: { fai: 1, pie: 1, int: 1, wis: 1 } },
@@ -434,8 +699,6 @@ const CLASSES = {
       { everyN: 7, add: { sol: 1, pie: 1, fai: 1 } },
     ],
   },
-
-  // ---- Tier 1.5 (draft-based unlocks) ----
   duelist: {
     name: 'Duelist', tier: 1.5, core: ['str', 'dex'],
     parents: ['fighter'], unlock: [{ class: 'fighter', level: 50 }],
@@ -495,7 +758,7 @@ const CLASSES = {
   },
 };
 
-// ---- Tier-1 upgrades (Upgrades tab) ----
+// ---- upgrades ----
 const UPGRADES = {
   'str-hp':       { stat: 'str', cost: 100,  kind: 'hp',        amt: 10,  label: '+10 Health' },
   'str-hpreg':    { stat: 'str', cost: 1000, kind: 'hpRegen',   amt: 0.1, label: '+0.1 Health regen/s' },
@@ -519,20 +782,19 @@ const UPGRADES = {
   'fai-resonreg': { stat: 'fai', cost: 1000, kind: 'resonRegen', amt: 0.01, label: '+0.01 Resonance regen/s' },
   'fai-dmg':      { stat: 'fai', cost: 100,  kind: 'dmg', tag: 'fai', amt: 1, label: '+1 Faith ability damage' },
   'pie-reson':    { stat: 'pie', cost: 100,  kind: 'reson',     amt: 10,  label: '+10 Resonance' },
-  'pie-resonreg': { stat: 'pie', cost: 1000, kind: 'resonRegen', amt: 0.01, label: '+0.01 Resonance regen/s' },
+  'pie-resonreg': { stat: 'pie', cost: 1000, kind: 'resonRegen', amt: 0.01, label: '+0.01 Piety regen/s' },
   'pie-dmg':      { stat: 'pie', cost: 100,  kind: 'dmg', tag: 'pie', amt: 1, label: '+1 Piety ability damage' },
 };
 const UPGRADE_STATS = ['str', 'end', 'dex', 'agi', 'int', 'wis', 'fai', 'pie'];
 
-// ---- Book 1: Chapters → Pages (authored fights) ----
-// Enemy stats not authored by the user are filled with 3 + 2×chapter.
-// killXp per chapter is a tuning fill-in (goal: Book 1 ≈ classless prestige).
+// ---- Books ----
 const T05_IDS = ['squire-trainee', 'scouts-runner', 'mages-apprentice', 'assistant-scribe'];
 const T1_IDS = ['fighter', 'rogue', 'mercenary', 'monk', 'mage', 'deacon'];
-const KILLXP_BY_CH = [50, 80, 180, 320, 600, 1200];
+const T15_IDS = ['duelist', 'ranger', 'knight', 'druid', 'scholar'];
 
+// Book 1 (chapter.killXp = per-victory XP; gearLvl = chapter; gold = chapter×10)
 const BOOK1 = [
-  { name: 'Training Ground', reward: { classless: 2500 }, pages: [
+  { name: 'Training Ground', reward: { classless: 2500 }, killXp: 50, gold: 10, gearLvl: 1, pages: [
     { id: 'dummy1', name: 'Training Dummy', hp: 25, stats: { end: 8 }, noRegen: true, noShield: true,
       abilities: ['stare-menacingly'] },
     { id: 'dummy2', name: 'Bigger Training Dummy', hp: 100, stats: { end: 12 },
@@ -540,7 +802,7 @@ const BOOK1 = [
     { id: 'dummy3', name: 'Rotating Dummy', hp: 50, stats: { str: 10, end: 8 },
       abilities: ['left-fist', 'right-fist'] },
   ]},
-  { name: 'Learning the Basics', reward: { classless: 4000, t05: 4000 }, pages: [
+  { name: 'Learning the Basics', reward: { classless: 4000, t05: 4000 }, killXp: 80, gold: 20, gearLvl: 2, pages: [
     { id: 'billy', name: 'Trainee Billy (8)', hp: 150, stats: { str: 15, end: 10, dex: 8 },
       abilities: ['weak-swing', 'drop-shield', 'cower'] },
     { id: 'billys-mom', name: "Billy's Mom (32)", hp: 250, stats: { str: 20, wis: 10, end: 12 },
@@ -548,7 +810,7 @@ const BOOK1 = [
     { id: 'james', name: 'Retiree James (108)', hp: 185, stats: { dex: 10, agi: 10, wis: 10 },
       abilities: ['back-in-my-day', 'where-am-i', 'shuffle', 'cane-swipe'] },
   ]},
-  { name: 'Adventure Guild Entrance Practical', reward: { classless: 9000, t05: 9000 }, pages: [
+  { name: 'Adventure Guild Entrance Practical', reward: { classless: 9000, t05: 9000 }, killXp: 180, gold: 30, gearLvl: 3, pages: [
     { id: 'florance', name: 'Rankless Adventurer Florance', hp: 350, stats: { dex: 16, agi: 12, end: 10 },
       abilities: ['twin-strike', 'throwing-dagger', 'leg-sweep'] },
     { id: 'amanda', name: 'Rankless Adventurer Amanda', hp: 320, stats: { agi: 16, dex: 12, wis: 10 },
@@ -556,34 +818,104 @@ const BOOK1 = [
     { id: 'martin', name: 'Low Copper Rank Martin', hp: 450, stats: { str: 18, int: 16, end: 12 },
       abilities: ['whirlwind-slash', 'icicle-darts', 'counter-strike', 'glacial-fist'] },
   ]},
-  { name: 'First Quest: Clean out the Sewer', reward: { classless: 16000, t05: 16000 }, pages: [
+  { name: 'First Quest: Clean out the Sewer', reward: { classless: 16000, t05: 16000 }, killXp: 320, gold: 40, gearLvl: 4, pages: [
     { id: 'baby-rat', name: 'Baby Rat (Awww)', hp: 120, stats: { agi: 14, wis: 8 },
       abilities: ['skittish', 'be-adorable', 'knaw', 'flee'] },
     { id: 'feeble-slime', name: 'Feeble Slime', hp: 220, stats: { end: 14, agi: 12 },
-      abilities: ['jump-attack', 'vibrate', 'cower'] }, // Deflate = Cower renamed
+      abilities: ['jump-attack', 'vibrate', 'cower'] },
     { id: 'diseased-rat', name: 'Diseased Rat', hp: 400, stats: { end: 20, str: 12 },
       abilities: ['diseased', 'projectile-bile', 'gnash-teeth', 'putrid-smell'] },
   ]},
-  { name: 'Explore Just Outside the Outpost Gate', reward: { classless: 30000, t05: 30000 }, pages: [
+  { name: 'Explore Just Outside the Outpost Gate', reward: { classless: 30000, t05: 30000 }, killXp: 600, gold: 50, gearLvl: 5, pages: [
     { id: 'slime', name: 'Slime', hp: 520, stats: { agi: 22, end: 16 },
       abilities: ['jump-attack', 'rebound', 'gunk-shot', 'serpentine'] },
     { id: 'horned-rabbit', name: 'Horned Rabbit', hp: 560, stats: { dex: 20, end: 20, agi: 16 },
-      abilities: ['war-cry-smol', 'headbutt', 'flee'] }, // Scurry Away = Attempt to Flee
+      abilities: ['war-cry-smol', 'headbutt', 'flee'] },
     { id: 'angry-mole', name: 'Angry Mole (You Stepped On His Home)', hp: 680, stats: { str: 24, dex: 20, end: 16 },
       abilities: ['fury', 'claw-swipes', 'rock-throw'] },
   ]},
-  { name: 'First Goblin, How Hard Could It Be?', reward: { classless: 50000, t05: 50000, t1: 50000 }, boss: true, pages: [
+  { name: 'First Goblin, How Hard Could It Be?', reward: { classless: 50000, t05: 50000, t1: 50000 }, killXp: 1200, gold: 60, gearLvl: 6, boss: true, pages: [
     { id: 'goblin', name: 'Wandering Goblin', hp: 1400, stats: { str: 30, wis: 12, end: 20, agi: 18 },
       abilities: ['knee-in-groin', 'bonk-on-head', 'wack', 'thwack', 'crack', 'whats-uhh'] },
   ]},
 ];
 
-// difficulty repeats of Book 1 for late-game testing
-const BOOKS = [
-  { name: 'Book 1', mult: 1 },
-  { name: 'Book 1 Hard', mult: 3 },
-  { name: 'Book 1 Nightmare', mult: 9 },
-  { name: 'Book 1 Hell', mult: 27 },
+// Book 2 (gearLvl = 6+chapter; gold = 80+20×chapter)
+const BOOK2 = [
+  { name: 'Verify Your Kills at the Guild', reward: { classless: 80000, t05: 80000, t1: 80000 }, killXp: 1900, gold: 100, gearLvl: 7, pages: [
+    { id: 'town-guard', name: 'Town Guard', hp: 1400, stats: { str: 28, end: 26, wis: 20, pie: 18 },
+      abilities: ['halt', 'present-papers', 'back-of-line', 'pay-the-fine', 'disrespect-toll'] },
+    { id: 'food-merchant', name: 'Food Stand Merchant', hp: 1600, stats: { int: 26, dex: 24, end: 20, str: 18 },
+      abilities: ['deals-to-die-for', 'special-recipe', 'supposed-sharp', 'dont-be-picky', 'one-for-two'] },
+    { id: 'pick-pocket', name: 'Pick Pocket', hp: 1300, stats: { str: 24, dex: 26, agi: 26, wis: 18 },
+      abilities: ['hand-over-coin', 'swiping-slash', 'guys-broke', 'skidaddle'] },
+  ]},
+  { name: 'Guild Advancement Practical', reward: { classless: 120000, t05: 120000, t1: 120000 }, killXp: 2700, gold: 120, gearLvl: 8, pages: [
+    { id: 'amanda-2', name: 'Low Copper Rank Amanda', hp: 2000, stats: { agi: 32, dex: 28, wis: 22 },
+      abilities: ['viper-strike-u', 'poison-daggers-u', 'distract', 'bolas-toss'] },
+    { id: 'brigitte', name: 'Low Copper Rank Brigitte', hp: 2200, stats: { dex: 32, agi: 30, end: 22 },
+      abilities: ['spear-throw', 'deflecting-stance', 'arterial-strike', 'jab-flurry', 'sonic-assault'] },
+    { id: 'martin-2', name: 'Mid Copper Rank Martin', hp: 2600, stats: { str: 32, int: 30, end: 24, wis: 20 },
+      abilities: ['whirlwind-slash-b2', 'icicle-darts-u', 'counter-strike', 'glacial-fist-u', 'frost-enchant'] },
+  ]},
+  { name: 'Deal With the Goblin Menace', reward: { classless: 170000, t05: 170000, t1: 170000 }, killXp: 3600, gold: 140, gearLvl: 9, pages: [
+    { id: 'several-slimes', name: 'Several Slimes', hp: 2400, stats: { agi: 34, end: 30, wis: 24 },
+      abilities: ['hum-in-unison', 'multiply', 'gunk-bombardment', 'rebound'] },
+    { id: 'rabbit-alpha', name: 'Horned Rabbit Alpha', hp: 3000, stats: { str: 36, end: 32, agi: 28 },
+      abilities: ['roar', 'full-bore', 'after-image', 'carotid-crunch'] },
+    { id: 'tree-beetle', name: 'Giant Tree Beetle', hp: 3200, stats: { str: 34, end: 36, agi: 26 },
+      abilities: ['camouflage', 'mandible-crunch', 'take-flight'] },
+    { id: 'timber-wolves', name: 'Timber Wolf', hp: 2600, stats: { str: 32, agi: 34, dex: 28, wis: 22 },
+      allies: ['timber-wolves'],
+      abilities: ['flanking-strike', 'howl', 'pounce', 'latching-bite'] },
+  ]},
+  { name: 'Goblin Encampment Found!', reward: { classless: 230000, t05: 230000, t1: 230000 }, killXp: 4600, gold: 160, gearLvl: 10, pages: [
+    { id: 'goblin-trapper', name: 'Goblin Trapper', hp: 3400, stats: { dex: 40, agi: 32, end: 28 },
+      abilities: ['ambush', 'rope-snag', 'sedation-dart', 'bone-knife'] },
+    { id: 'goblin-sharpshooter', name: 'Goblin Sharpshooter', hp: 3200, stats: { dex: 44, agi: 30, end: 26 },
+      abilities: ['ambush', 'leg-shot', 'scatter-shot', 'between-eyes'] },
+    { id: 'goblin-guards', name: 'Goblin Guard', hp: 3600, stats: { end: 42, dex: 34, str: 30, wis: 22 },
+      allies: ['goblin-guards'],
+      abilities: ['shield-bash', 'fortified', 'simultaneous-slash', 'panic'] },
+    { id: 'hobgoblin', name: 'Enraged Hobgoblin', hp: 5000, stats: { str: 48, end: 40, agi: 28 },
+      abilities: ['swing-wildly', 'full-bore', 'war-cry-hob', 'berserk'] },
+    { id: 'goblin-elder', name: 'Goblin Elder', hp: 6000, stats: { str: 46, wis: 30, end: 36, agi: 28 },
+      abilities: ['knee-in-groin-u', 'bonk-on-head-u', 'wack-u', 'thwack-u', 'crack-u', 'whats-that'] },
+  ]},
+  { name: 'Better Head Back Before Dark', reward: { classless: 300000, t05: 300000, t1: 300000 }, killXp: 5700, gold: 180, gearLvl: 11, pages: [
+    { id: 'fleeing-wolves', name: 'Fleeing Timber Wolf', hp: 3000, stats: { str: 36, agi: 38, wis: 24 },
+      abilities: ['yelp', 'bite', 'bite', 'full-bore', 'skidaddle'] },
+    { id: 'silence', name: 'Silence...', hp: 1, req: 1, silence: true, noRegen: true, noShield: true,
+      stats: { sol: 50 },
+      abilities: ['nothingness', 'too-quiet', 'something-wrong', 'neck-hairs', 'not-supposed'] },
+    { id: 'wounded-amanda', name: 'Wounded Adventurer Amanda', hp: 2000, req: 1, reverse: true, noShield: true,
+      stats: { agi: 32, dex: 28, wis: 22, sol: 30 },
+      abilities: ['have-to-run', 'not-normal', 'slow-it-down', 'just-leave-him'] },
+  ]},
+  { name: 'Is That You... Martin?', reward: { classless: 380000, t05: 380000, t1: 380000, t15: 380000 }, killXp: 6900, gold: 200, gearLvl: 12, boss: true, pages: [
+    { id: 'corrupted-wolf', name: 'Corrupted Timber Wolf', hp: 14000, dormant: true, startFeast: true,
+      stats: { str: 55, dex: 48, agi: 46, end: 50, wis: 30, sol: 40 },
+      playerAllies: ['amanda-ally'],
+      abilities: ['ferocious-howl', 'hatred-brews', 'coagulated-claws', 'relentless-assault', 'decisive-lunge', 'feast'] },
+  ]},
 ];
-const PAGES_PER_BOOK = BOOK1.reduce((a, c) => a + c.pages.length, 0); // 16
-const TOTAL_PAGES = PAGES_PER_BOOK * BOOKS.length;
+
+// ally templates (amanda = half the player's stats, built at runtime)
+const ALLY_DEFS = {
+  'amanda-ally': { name: 'Amanda', halfPlayer: true,
+    abilities: ['viper-strike-u', 'poison-daggers-u', 'distract', 'bolas-toss'] },
+};
+
+const BOOKS = [
+  { name: 'Book 1', content: BOOK1, mult: 1 },
+  { name: 'Book 2', content: BOOK2, mult: 1 },
+  { name: 'Book 1 Hard', content: BOOK1, mult: 3 },
+  { name: 'Book 2 Hard', content: BOOK2, mult: 3 },
+  { name: 'Book 1 Nightmare', content: BOOK1, mult: 9 },
+  { name: 'Book 2 Nightmare', content: BOOK2, mult: 9 },
+  { name: 'Book 1 Hell', content: BOOK1, mult: 27 },
+  { name: 'Book 2 Hell', content: BOOK2, mult: 27 },
+];
+const BOOK_PAGES = BOOKS.map((b) => b.content.reduce((a, c) => a + c.pages.length, 0));
+const BOOK_STARTS = BOOK_PAGES.reduce((acc, n, i) => { acc.push(i === 0 ? 0 : acc[i - 1] + BOOK_PAGES[i - 1]); return acc; }, []);
+const TOTAL_PAGES = BOOK_PAGES.reduce((a, b) => a + b, 0);

@@ -5,12 +5,13 @@ a single-path node map, level a branching **class tree**, and ascend through
 prestige. Built as a zero-dependency Progressive Web App — plain HTML/CSS/JS, no
 build step, no frameworks. Works offline once visited and installs to a phone.
 
-> **Status:** Milestone 4. Authored **Book 1** (5 chapters + boss, every fight
-> hand-built), a status-keyword engine (Poison, Blind, Guilt, Frost, …),
-> **Concepts** (passive slot abilities), per-class ability unlock tracks,
-> Tier 1.5 classes, chapter completion rewards, prestige-scaling win
-> requirements, enemy ability mystery/reveal, and **Tomes** that permanently
-> teach enemy abilities.
+> **Status:** Milestone 5. Authored **Books 1 & 2** (including ally fights, a
+> silent... something, a reverse-combat rescue, and a Sustain-feasting boss),
+> stacking conditions with snapshots (2×Bleed 5 format), **Burst / Sustain /
+> Rally / Initiate** ability types, Charge & Ammo reloads, **EP** (Sacrifice /
+> Enhance / Buy Back), a pinned ability dock, nested hold-tooltips with keyword
+> lookups, allies with priority display, Tier-1 class ability tracks, and the
+> **Bestiary** (enemies, classes, abilities, keywords).
 
 ## Run it locally
 

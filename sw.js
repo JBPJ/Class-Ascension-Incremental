@@ -1,6 +1,6 @@
 // Pathbound service worker — network-first with cache fallback:
 // players always get the newest version when online, and the game still works offline.
-const CACHE = 'pathbound-v7';
+const CACHE = 'pathbound-v8';
 const FILES = [
   '.', 'index.html', 'style.css', 'manifest.webmanifest',
   'js/data.js', 'js/core.js', 'js/combat.js', 'js/ui.js', 'js/main.js',

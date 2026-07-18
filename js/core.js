@@ -1,7 +1,7 @@
-// ===== Pathbound (Idle rework) — profile, leveling, book map, gear, tomes =====
+// ===== Pathbound (Idle rework) — profile, leveling, book map, gear, EP =====
 'use strict';
 
-const SAVE_KEY = 'pathbound-save-v6'; // v6: books/chapters/pages, statuses, class unlocks
+const SAVE_KEY = 'pathbound-save-v7'; // v7: book 2, EP/enhance, stacking conditions
 
 const G = {
   profile: null,
@@ -11,6 +11,10 @@ const G = {
 const rnd = (n) => Math.floor(Math.random() * n);
 const pick = (arr) => arr[rnd(arr.length)];
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+function seededPick(arr, seed) {
+  const x = Math.sin((seed + 1) * 99991) * 10000;
+  return arr[Math.floor((x - Math.floor(x)) * arr.length)];
+}
 
 function emptyStatMap() {
   const m = {}; STATS.forEach((s) => (m[s] = 0)); return m;
@@ -29,16 +33,20 @@ function newProfile() {
     maxLevel: {},
     prestiged: {},
     skills: [],
-    tomeSkills: [],              // learned from tomes — survive prestige
+    tomeSkills: [],
     slots: new Array(CFG.slotCount).fill(null),
+    ep: 0,                       // Enhance Points (run-scoped)
+    sacrificed: [],              // ability ids sacrificed this run
+    enhance: {},                 // abilityId -> {spent,multi,charge,burst,ammo,dur:{},stack:{}}
     gold: 0,
     inventory: [],
     equipment: equipment,
-    node: 0,                     // global page index
-    wins: {},                    // per-run: page index -> wins
-    seen: {},                    // enemy ability ids revealed
-    chapterClears: {},           // chapterKey -> completed-run count (perm.)
-    completedThisRun: {},        // chapterKey -> true (reset on prestige)
+    node: 0,
+    wins: {},
+    seen: {},
+    metEnemies: {},              // enemy id -> true (Bestiary)
+    chapterClears: {},
+    completedThisRun: {},
     autoTravel: true,
     pendingDrafts: [],
     totalXp: 0,
@@ -57,16 +65,15 @@ function load() {
   } catch (e) { G.profile = null; }
   if (!G.profile || !G.profile.classXp) {
     G.profile = newProfile();
-    // players start at Classless level 1 — grants the four L1 abilities
     addClassXpDirect('classless', playerCost('classless', 1));
     save();
   }
   Object.keys(CLASSES).forEach((id) => { if (G.profile.classXp[id] == null) G.profile.classXp[id] = 0; });
-  ['upgrades', 'maxLevel', 'prestiged', 'wins', 'equipment', 'seen', 'chapterClears', 'completedThisRun'].forEach((k) => {
-    if (!G.profile[k]) G.profile[k] = {};
-  });
-  ['inventory', 'tomeSkills', 'pendingDrafts', 'skills'].forEach((k) => { if (!G.profile[k]) G.profile[k] = []; });
+  ['upgrades', 'maxLevel', 'prestiged', 'wins', 'equipment', 'seen', 'metEnemies',
+   'chapterClears', 'completedThisRun', 'enhance'].forEach((k) => { if (!G.profile[k]) G.profile[k] = {}; });
+  ['inventory', 'tomeSkills', 'pendingDrafts', 'skills', 'sacrificed'].forEach((k) => { if (!G.profile[k]) G.profile[k] = []; });
   if (G.profile.gold == null) G.profile.gold = 0;
+  if (G.profile.ep == null) G.profile.ep = 0;
   if (G.profile.autoTravel == null) G.profile.autoTravel = true;
   checkCompletions();
 }
@@ -77,7 +84,7 @@ function derive(s) {
   const soul2 = 1 + s.sol / 200;
   const perA = ((s.per * 2) / 10) + 1;
   return {
-    atkSpeed:    1 + s.agi / 100,   // Soul removed from both speed formulas
+    atkSpeed:    1 + s.agi / 100,
     castSpeed:   1 + s.wis / 100,
     maxHp:       100 + (((s.pie + s.fai) / 10) + 1) * s.per * soul,
     hpRegen:     (1 + (((s.end * 2) / 100) + 1) * perA * soul) / 10,
@@ -91,7 +98,7 @@ function derive(s) {
   };
 }
 
-// ---- leveling math ----
+// ---- leveling ----
 function levelCostRaw(classId, level) {
   const c = CLASSES[classId];
   const base = c.baseXp + (c.flatStep || 0) * (level - 1);
@@ -141,8 +148,7 @@ function ancestorsOf(classId) {
 function statGainCumulative(classId, level) {
   const out = emptyStatMap();
   if (level <= 0) return out;
-  const c = CLASSES[classId];
-  c.gains.forEach((rule) => {
+  CLASSES[classId].gains.forEach((rule) => {
     const n = rule.everyN;
     const lowCount = Math.floor(Math.min(level, 100) / n);
     const hiCount = level > 100 ? (Math.floor(level / (2 * n)) - Math.floor(100 / (2 * n))) : 0;
@@ -169,7 +175,6 @@ function characterStats() {
   });
   const eq = equipmentStats();
   STATS.forEach((st) => (s[st] += eq[st]));
-  // Determination concept: +0.2% × highest classless level to SOL and PER
   if (G.profile.slots.indexOf('determination') !== -1) {
     const m = 1 + 0.002 * (G.profile.maxLevel.classless || 0);
     s.sol *= m; s.per *= m;
@@ -177,7 +182,7 @@ function characterStats() {
   return s;
 }
 
-// ---- class unlocks & ability grants ----
+// ---- class unlocks & grants ----
 function classUnlocked(classId) {
   if (classId === 'classless') return true;
   return (CLASSES[classId].unlock || []).every((r) => levelOf(r.class) >= r.level);
@@ -186,7 +191,7 @@ function grantAbility(id) {
   if (G.profile.skills.indexOf(id) !== -1) return;
   G.profile.skills.push(id);
   const empty = G.profile.slots.indexOf(null);
-  if (empty !== -1) G.profile.slots[empty] = id; // auto-equip when there's room
+  if (empty !== -1) G.profile.slots[empty] = id;
 }
 function updateMaxLevel(classId) {
   const lvl = levelOf(classId);
@@ -197,16 +202,14 @@ function checkLevelUnlocks(classId, before, after) {
     if (before < mark && after >= mark) {
       const u = CLASSES[classId].unlocks;
       if (u) (u[mark] || []).forEach(grantAbility);
-      else G.profile.pendingDrafts.push(rollDraft(G.profile.skills)); // tier 1+ draft
+      else G.profile.pendingDrafts.push(rollDraft(G.profile.skills));
     }
   });
 }
-// XP with the downward 50% cascade (combat kills)
 function addClassXp(classId, amount) {
   addClassXpDirect(classId, amount);
   ancestorsOf(classId).forEach((anc) => addClassXpDirect(anc, amount / 2));
 }
-// XP without cascade (completion rewards, seeding)
 function addClassXpDirect(classId, amount) {
   const before = levelOf(classId);
   G.profile.classXp[classId] = (G.profile.classXp[classId] || 0) + amount;
@@ -252,6 +255,99 @@ function upgradeBonuses() {
   return b;
 }
 
+// ---- EP: Sacrifice / Enhance / Buy Back (run-scoped) ----
+function enhOf(id) {
+  if (!G.profile.enhance[id]) G.profile.enhance[id] = { spent: 0, multi: 0, charge: 0, burst: 0, ammo: 0, dur: {}, stack: {} };
+  const e = G.profile.enhance[id];
+  if (!e.dur) e.dur = {}; if (!e.stack) e.stack = {};
+  return e;
+}
+function sacrificeAbility(id) {
+  const i = G.profile.skills.indexOf(id);
+  if (i === -1) return false;
+  G.profile.skills.splice(i, 1);
+  const si = G.profile.slots.indexOf(id);
+  if (si !== -1) G.profile.slots[si] = null;
+  G.profile.sacrificed.push(id);
+  G.profile.ep += 1;
+  save();
+  return true;
+}
+function buyBackAbility(id) {
+  const i = G.profile.sacrificed.indexOf(id);
+  if (i === -1 || G.profile.ep < 1) return false;
+  G.profile.sacrificed.splice(i, 1);
+  G.profile.ep -= 1;
+  grantAbility(id);
+  save();
+  return true;
+}
+// enhancement options: {key, cost, available(def), apply(enh)}
+function enhanceOptions(id) {
+  const def = ABILITIES[id];
+  const opts = [];
+  if (def.full && def.full.some((op) => op.t === 'dmg' && op.stat)) {
+    opts.push({ key: 'multi', label: '+0.1× stat multiplier', cost: 1 });
+  }
+  if (def.charge) opts.push({ key: 'charge', label: '+1 Charge', cost: 10 });
+  if (def.burst) opts.push({ key: 'burst', label: '+1 Burst', cost: 10 });
+  if (def.ammo && !def.charge) opts.push({ key: 'ammo', label: '+1 Ammo', cost: def.ammo <= 1 ? 20 : 10 });
+  (def.full || []).forEach((op) => {
+    if (op.t !== 'st') return;
+    const meta = STATUSES[op.key];
+    if (op.dur && op.key !== 'interrupted') {
+      opts.push({ key: 'dur:' + op.key, label: '+1 ' + meta.name + ' duration', cost: 2 });
+    }
+    if (meta.kind === 'stack' || meta.kind === 'charge') {
+      opts.push({ key: 'stack:' + op.key, label: '+1 ' + meta.name + ' stack', cost: 10 });
+    }
+  });
+  return opts;
+}
+function buyEnhance(id, optKey, cost) {
+  if (G.profile.ep < cost) return false;
+  G.profile.ep -= cost;
+  const e = enhOf(id);
+  e.spent += cost;
+  if (optKey === 'multi') e.multi += 1;
+  else if (optKey === 'charge') e.charge += 1;
+  else if (optKey === 'burst') e.burst += 1;
+  else if (optKey === 'ammo') e.ammo += 1;
+  else if (optKey.indexOf('dur:') === 0) { const k = optKey.slice(4); e.dur[k] = (e.dur[k] || 0) + 1; }
+  else if (optKey.indexOf('stack:') === 0) { const k = optKey.slice(6); e.stack[k] = (e.stack[k] || 0) + 1; }
+  save();
+  return true;
+}
+// the player's enhanced version of an ability definition
+function enhancedDef(id) {
+  const base = ABILITIES[id];
+  const e = G.profile.enhance[id];
+  if (!e || !e.spent) return base;
+  const d = JSON.parse(JSON.stringify(base));
+  // restore non-serializable flags
+  d.__enh = e.spent;
+  // cost: +1 per 2 EP spent, applied to the primary resource
+  const costUp = Math.floor(e.spent / 2);
+  ['stam', 'mana', 'reson'].forEach((k) => { if (d.cost[k]) d.cost[k] += costUp; });
+  if (e.charge || e.ammo) d.ammo = (d.ammo || 0) + e.charge + e.ammo;
+  if (e.burst) d.burst = (d.burst || 0) + e.burst;
+  let firstDmg = true;
+  (d.full || []).forEach((op) => {
+    if (op.t === 'dmg') {
+      if (firstDmg) { op.base += e.spent; firstDmg = false; } // +1 flat dmg per EP spent
+      if (op.stat && e.multi) op.mult = +(op.mult + 0.1 * e.multi).toFixed(2);
+    }
+    if (op.t === 'st') {
+      if (op.dur && e.dur[op.key]) op.dur += e.dur[op.key];
+      if (e.stack[op.key]) {
+        if (STATUSES[op.key].kind === 'charge') op.count = (op.count || 1) + e.stack[op.key];
+        else op.stacks = (op.stacks || 1) + e.stack[op.key];
+      }
+    }
+  });
+  return d;
+}
+
 // ---- prestige ----
 function canPrestige(classId) {
   return !G.profile.prestiged[classId] && levelOf(classId) >= CFG.prestigeLevel;
@@ -260,12 +356,10 @@ function doPrestige(classId) {
   if (!canPrestige(classId)) return false;
   updateMaxLevel(classId);
   G.profile.prestiged[classId] = true;
-  // chapters completed this run reduce future victory requirements
   Object.keys(G.profile.completedThisRun).forEach((key) => {
     G.profile.chapterClears[key] = (G.profile.chapterClears[key] || 0) + 1;
   });
   G.profile.completedThisRun = {};
-  // reset run progression
   Object.keys(CLASSES).forEach((id) => (G.profile.classXp[id] = 0));
   G.profile.selectedClass = 'classless';
   G.profile.skills = [];
@@ -273,30 +367,42 @@ function doPrestige(classId) {
   G.profile.pendingDrafts = [];
   G.profile.node = 0;
   G.profile.wins = {};
-  // back to Classless level 1 (regrants the L1 abilities)
+  G.profile.ep = 0;
+  G.profile.sacrificed = [];
+  G.profile.enhance = {};
   addClassXpDirect('classless', playerCost('classless', 1));
-  // tome skills are permanent — relearn and auto-equip
   G.profile.tomeSkills.forEach(grantAbility);
-  checkCompletions(); // zero-requirement chapters complete instantly
+  checkCompletions();
   save();
   return true;
 }
 
-// ---- drafts (tier 1+ classes) ----
+// ---- drafts (tier 1.5+): pool = draft skills + learnable enemy abilities ----
 function rollDraft(owned, n) {
   n = n || 3;
-  const pool = Object.keys(ABILITIES).filter((id) => ABILITIES[id].draft && owned.indexOf(id) === -1);
+  const pool = Object.keys(ABILITIES).filter((id) => {
+    const a = ABILITIES[id];
+    if (owned.indexOf(id) !== -1) return false;
+    if (a.draft) return true;
+    return enemyAbilityIds()[id] && !a.noLearn && !a.negative && !a.concept;
+  });
   const offer = [];
   while (offer.length < n && pool.length) offer.push(pool.splice(rnd(pool.length), 1)[0]);
   return offer;
 }
 
-// ---- the book map: global page index -> book/chapter/page ----
+// ---- the book map ----
+function bookOf(g) {
+  let b = 0;
+  while (b < BOOKS.length - 1 && g >= BOOK_STARTS[b + 1]) b++;
+  return b;
+}
 function pageInfo(g) {
-  const b = Math.floor(g / PAGES_PER_BOOK);
-  let within = g % PAGES_PER_BOOK;
-  for (let ci = 0; ci < BOOK1.length; ci++) {
-    const ch = BOOK1[ci];
+  const b = bookOf(g);
+  let within = g - BOOK_STARTS[b];
+  const content = BOOKS[b].content;
+  for (let ci = 0; ci < content.length; ci++) {
+    const ch = content[ci];
     if (within < ch.pages.length) {
       return {
         book: b, bookName: BOOKS[b].name, mult: BOOKS[b].mult,
@@ -304,7 +410,7 @@ function pageInfo(g) {
         page: within + 1, pageCount: ch.pages.length,
         enemy: ch.pages[within],
         key: 'b' + b + 'c' + ci,
-        reward: ch.reward,
+        reward: ch.reward, killXp: ch.killXp, gold: ch.gold, gearLvl: ch.gearLvl,
       };
     }
     within -= ch.pages.length;
@@ -312,20 +418,20 @@ function pageInfo(g) {
   return null;
 }
 function chapterPages(b, ci) {
-  // global indices of a chapter's pages
-  let start = b * PAGES_PER_BOOK;
-  for (let i = 0; i < ci; i++) start += BOOK1[i].pages.length;
+  let start = BOOK_STARTS[b];
+  const content = BOOKS[b].content;
+  for (let i = 0; i < ci; i++) start += content[i].pages.length;
   const out = [];
-  for (let i = 0; i < BOOK1[ci].pages.length; i++) out.push(start + i);
+  for (let i = 0; i < content[ci].pages.length; i++) out.push(start + i);
   return out;
 }
 function reqFor(g) {
   const info = pageInfo(g);
-  return Math.max(0, CFG.winsToAdvance - (G.profile.chapterClears[info.key] || 0));
+  const base = info.enemy.req || CFG.winsToAdvance;
+  return Math.max(0, base - (G.profile.chapterClears[info.key] || 0));
 }
 function winsOn(g) { return G.profile.wins[g] || 0; }
 function canAdvance() { return winsOn(G.profile.node) >= reqFor(G.profile.node); }
-// furthest reachable page: first page whose requirement isn't met yet
 function computeMaxNode() {
   let i = 0;
   while (i < TOTAL_PAGES - 1 && winsOn(i) >= reqFor(i)) i++;
@@ -342,29 +448,29 @@ function travel(dir) {
   save();
   return true;
 }
-// chapter completion rewards (once per run; re-earnable after prestige)
 function checkCompletions() {
   const msgs = [];
   for (let b = 0; b < BOOKS.length; b++) {
-    for (let ci = 0; ci < BOOK1.length; ci++) {
+    const content = BOOKS[b].content;
+    for (let ci = 0; ci < content.length; ci++) {
       const key = 'b' + b + 'c' + ci;
       if (G.profile.completedThisRun[key]) continue;
       const done = chapterPages(b, ci).every((g) => winsOn(g) >= reqFor(g));
       if (!done) continue;
       G.profile.completedThisRun[key] = true;
-      const rw = BOOK1[ci].reward, mult = BOOKS[b].mult;
+      const rw = content[ci].reward, mult = BOOKS[b].mult;
       const targets = [];
       if (rw.classless) targets.push(['classless', rw.classless]);
       if (rw.t05) T05_IDS.forEach((id) => targets.push([id, rw.t05]));
       if (rw.t1) T1_IDS.forEach((id) => targets.push([id, rw.t1]));
+      if (rw.t15) T15_IDS.forEach((id) => targets.push([id, rw.t15]));
       targets.forEach((t) => addClassXpDirect(t[0], t[1] * mult));
-      msgs.push(BOOKS[b].name + ' — "' + BOOK1[ci].name + '" complete! Rewards granted.');
+      msgs.push(BOOKS[b].name + ' — "' + content[ci].name + '" complete! Rewards granted.');
     }
   }
   if (msgs.length) save();
   return msgs;
 }
-// fast-forward through pages already cleared by prestige (requirement 0)
 function skipClearedPages() {
   if (!G.profile.autoTravel) return;
   let guard = 0;
@@ -373,21 +479,14 @@ function skipClearedPages() {
     G.profile.node += 1;
   }
 }
-
-function killXpFor(g) {
-  const info = pageInfo(g);
-  return KILLXP_BY_CH[info.chapter - 1] * info.mult;
-}
-function goldFor(g) {
-  const info = pageInfo(g);
-  return info.chapter * CFG.goldPerChapter * info.mult;
-}
+function killXpFor(g) { const i = pageInfo(g); return i.killXp * i.mult; }
+function goldFor(g) { const i = pageInfo(g); return i.gold * i.mult; }
 
 // ---- enemy build data ----
 function genEnemy(g) {
   const info = pageInfo(g);
   const def = info.enemy;
-  const filler = 3 + 2 * info.chapter;
+  const filler = 3 + 2 * info.chapter + (info.book >= 1 ? 10 : 0);
   const stats = {};
   STATS.forEach((s) => { stats[s] = ((def.stats && def.stats[s]) || filler) * info.mult; });
   return {
@@ -395,13 +494,29 @@ function genEnemy(g) {
     hp: def.hp * info.mult,
     stats: stats,
     abilities: def.abilities.slice(),
-    noRegen: !!def.noRegen,
-    noShield: !!def.noShield,
-    bookTag: info.mult > 1 ? info.bookName.replace('Book 1 ', '') : null,
+    allies: (def.allies || []).slice(),
+    playerAllies: (def.playerAllies || []).slice(),
+    noRegen: !!def.noRegen, noShield: !!def.noShield,
+    silence: !!def.silence, reverse: !!def.reverse,
+    dormant: !!def.dormant, startFeast: !!def.startFeast,
+    bookTag: info.mult > 1 ? BOOKS[info.book].name.replace(/Book \d /, '') : null,
   };
 }
 
-// ---- equipment generation & blacksmith ----
+// all ability ids used by book enemies (for tome pool / drafts)
+let _enemyAbilityCache = null;
+function enemyAbilityIds() {
+  if (_enemyAbilityCache) return _enemyAbilityCache;
+  const used = {};
+  [BOOK1, BOOK2].forEach((book) => book.forEach((ch) => ch.pages.forEach((p) => {
+    p.abilities.forEach((id) => (used[id] = true));
+    (p.allies || []).forEach((aid) => { /* allies share page defs */ });
+  })));
+  _enemyAbilityCache = used;
+  return used;
+}
+
+// ---- equipment & blacksmith ----
 function rollPrefix(level) {
   let base = 1 + rnd(Math.max(1, level));
   let mult = 1;
@@ -422,19 +537,26 @@ function genRune(level) {
   return { kind: 'rune', stat: p.stat, base: p.base, mult: p.mult, amt: p.amt, level: level };
 }
 function invFull() { return G.profile.inventory.length >= CFG.invSize; }
+// scrap value = total roll sum (runes: their roll; tomes: 1)
+function scrapValue(it) {
+  if (it.kind === 'gear') return it.prefixes.reduce((a, p) => a + (p ? p.amt : 0), 0) || 1;
+  if (it.kind === 'rune') return it.amt;
+  return 1;
+}
 
 // ---- tomes ----
-// pool: abilities used by book enemies, learnable, not yet owned/learned/in-bag
+function sameAsRoot(id) { return ABILITIES[id].sameAs || id; }
+function ownsSkillOrVariant(id) {
+  const root = sameAsRoot(id);
+  const has = (x) => sameAsRoot(x) === root;
+  return G.profile.skills.some(has) || G.profile.tomeSkills.some(has) || G.profile.sacrificed.some(has) ||
+    G.profile.inventory.some((it) => it.kind === 'tome' && has(it.skill));
+}
 function tomePool() {
-  const used = {};
-  BOOK1.forEach((ch) => ch.pages.forEach((p) => p.abilities.forEach((id) => (used[id] = true))));
-  return Object.keys(used).filter((id) => {
+  return Object.keys(enemyAbilityIds()).filter((id) => {
     const a = ABILITIES[id];
-    if (a.noLearn || a.negative) return false;
-    if (G.profile.skills.indexOf(id) !== -1) return false;
-    if (G.profile.tomeSkills.indexOf(id) !== -1) return false;
-    if (G.profile.inventory.some((it) => it.kind === 'tome' && it.skill === id)) return false;
-    return true;
+    if (!a || a.noLearn || a.negative) return false;
+    return !ownsSkillOrVariant(id);
   });
 }
 function genTome() {
@@ -462,10 +584,11 @@ function bsUpgrade(item) {
   item.upgrades += 1; item.level += 1;
   save(); return true;
 }
+function rerollCostOf(item) { return CFG.rerollCosts[Math.min(item.rerolls, CFG.rerollCosts.length - 1)]; }
 function bsReroll(item, pfxIdx, mode) {
   const p = item.prefixes && item.prefixes[pfxIdx];
   if (!p || item.rerolls >= CFG.maxRerolls) return false;
-  if (!spendGold(CFG.bsCosts.reroll)) return false;
+  if (!spendGold(rerollCostOf(item))) return false;
   if (mode === 'amt') { p.base = 1 + rnd(Math.max(1, item.level)); }
   else { p.stat = pick(GEAR_STATS); }
   p.amt = p.base * p.mult;
@@ -493,7 +616,7 @@ function bsAugment(item, pfxIdx, runeIdx) {
 function scrapItem(invIdx) {
   const item = G.profile.inventory[invIdx];
   if (!item) return false;
-  G.profile.gold += item.level;
+  G.profile.gold += scrapValue(item);
   G.profile.inventory.splice(invIdx, 1);
   save(); return true;
 }

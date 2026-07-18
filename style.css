@@ -281,6 +281,46 @@ g.reach circle { animation: pulse 1.4s infinite; }
 }
 .upg:first-of-type { border-top: none; }
 
+/* ===== M5: pinned ability dock, allies, nested tooltips ===== */
+.combat.pinned { padding-bottom: 8px; }
+.sessionwrap:has(.combat.pinned) { padding-bottom: 210px; }
+.slotdock {
+  position: fixed; bottom: calc(52px + env(safe-area-inset-bottom));
+  left: 50%; transform: translateX(-50%);
+  width: 100%; max-width: 520px; z-index: 18;
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  border-top: 1px solid var(--line);
+  padding: 6px 8px;
+}
+.slotdock .slots { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 5px; margin: 0; }
+.slotdock .abil { min-height: 54px; padding: 5px 3px 12px; }
+.slotdock .abil b { font-size: 0.68rem; }
+.slotdock .abil span { font-size: 0.6rem; }
+.slotdock .slot.empty { min-height: 54px; font-size: 0.8rem; }
+
+.allyrow { display: flex; align-items: stretch; gap: 6px; margin-bottom: 6px; }
+.ally {
+  flex: 1; max-width: 190px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; padding: 5px 7px; font-size: 0.7rem;
+  -webkit-user-select: none; user-select: none;
+}
+.ally-name { font-weight: 700; margin-bottom: 2px; }
+.ally .bar.mini { height: 7px; margin: 2px 0; border-radius: 4px; }
+.ally .bar.mini span { display: none; }
+.ally-ab { display: flex; align-items: center; gap: 4px; margin-top: 1px; }
+.ally-ab span { font-size: 0.6rem; font-weight: 700; width: 64px; flex-shrink: 0; overflow: hidden; white-space: nowrap; }
+.fillbar.mini { position: static; height: 4px; flex: 1; border-radius: 2px; overflow: hidden; background: #101222; }
+.allyx {
+  background: var(--panel2); border: 1px solid var(--line); color: var(--dim);
+  border-radius: 10px; font-weight: 700; width: 40px; cursor: pointer;
+}
+.kw {
+  display: inline-block; color: var(--gold); font-weight: 700; cursor: pointer;
+  -webkit-user-select: none; user-select: none;
+}
+.tipcard.kw2 { bottom: calc(70px + 220px + env(safe-area-inset-bottom)); border-color: var(--gold); z-index: 45; }
+.tipsep { border: none; border-top: 1px solid var(--line); margin: 8px 0; }
+
 /* ===== M3: fill-bar ability slots ===== */
 .abil {
   position: relative;
@@ -311,11 +351,12 @@ g.reach circle { animation: pulse 1.4s infinite; }
 .eslot .ename { font-size: 0.7rem; font-weight: 700; width: 92px; flex-shrink: 0; }
 .eslot .fillbar { position: static; height: 6px; flex: 1; border-radius: 3px; overflow: hidden; }
 
-/* hold-tooltip */
+/* hold-tooltip (sits above the pinned ability dock) */
 .tipcard {
   position: fixed; left: 50%; transform: translateX(-50%);
-  bottom: calc(70px + env(safe-area-inset-bottom));
+  bottom: calc(216px + env(safe-area-inset-bottom));
   width: calc(100% - 24px); max-width: 496px; z-index: 40;
+  max-height: 45vh; overflow-y: auto;
   background: var(--panel2); border: 1px solid var(--c, var(--accent));
   border-radius: 12px; padding: 12px; box-shadow: 0 6px 24px #000a;
 }

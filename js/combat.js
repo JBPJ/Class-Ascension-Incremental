@@ -1,55 +1,56 @@
-// ===== Pathbound (Idle rework) — fill-bar combat engine with statuses =====
+// ===== Pathbound (Idle rework) — fill-bar combat engine: stacks, allies, bursts =====
 'use strict';
 
 let C = null;
 
 // ---- ability metadata ----
 function abilityDef(id) { return ABILITIES[id]; }
+// the definition a given unit actually uses (players get enhancements)
+function defFor(unit, id) { return unit.isPlayer ? enhancedDef(id) : abilityDef(id); }
 function costTotal(cost) { return (cost.stam || 0) + (cost.mana || 0) + (cost.reson || 0); }
 function isSpell(def) { return !!(def.cost.mana || def.cost.reson); }
 function isSkillAb(def) { return !!def.cost.stam; }
-function fillTimeOf(side, def) {
-  return Math.max(0.25, costTotal(def.cost)); // seconds of "cost" — divided by live speed while filling
+function fillTimeOf(unit, def, slot) {
+  return Math.max(0.25, costTotal(def.cost)) * ((slot && slot.costMult) || 1);
 }
 
-function slotState(id) {
-  const def = abilityDef(id);
+function slotState(unit, id) {
+  const def = defFor(unit || { isPlayer: false }, id) || abilityDef(id);
   return {
-    id: id,
-    prog: 0,
-    cd: (def && def.startCd) ? cooldownOf(null, def) : 0,
+    id: id, prog: 0,
+    cd: (def && def.startCd) ? baseCooldown(def) : 0,
     ammo: (def && def.ammo) ? def.ammo : null,
-    reloading: false,   // ammo/charge refill in progress
-    frozen: 0,          // concuss
-    followStacks: 0,    // follow-up mechanic
-    hasten: 1,          // speedLink boost until it deals damage
-    rf: 0,              // repeating-focus cast counter
-    freeUsed: false,    // firstFree consumed
+    reloading: false, frozen: 0,
+    followStacks: 0, hasten: 1, rf: 0,
+    costMult: 1, bonusBurst: 0,
+    sustaining: null,
   };
 }
 
-function cooldownOf(side, def) {
-  let cd = isSpell(def) ? CFG.cdSpell : CFG.cdSkill;
-  if (side && side.concepts) {
-    if (side.concepts['tireless']) cd = Math.max(0, cd - 0.5);
-    if (side.concepts['rebound'] && def.tag === 'agi' && isSkillAb(def)) cd = 0;
+function baseCooldown(def) { return isSpell(def) ? CFG.cdSpell : CFG.cdSkill; }
+function cooldownOf(unit, def) {
+  let cd = baseCooldown(def);
+  if (unit && unit.concepts) {
+    if (unit.concepts['tireless']) cd = Math.max(0, cd - 0.5);
+    if (unit.concepts['rebound'] && def.tag === 'agi' && isSkillAb(def)) cd = 0;
   }
   return cd;
 }
-// the long cooldown after the last use of an ammo/charge ability
-// (modifiers like Tireless apply to the base BEFORE the multiplier)
-function rechargeCd(side, def) {
-  const base = cooldownOf(side, def);
-  if (def.charge) return base * (1 + 0.5 * def.ammo); // Charge: +50% per charge
-  return base * 5;                                    // Ammo: 5× reload
+function burstOf(def, slot) { return (def.burst || 0) + ((slot && slot.bonusBurst) || 0); }
+function rechargeCd(unit, def) {
+  const base = cooldownOf(unit, def);
+  if (def.charge) return base * (1 + 0.5 * def.ammo);
+  return base * 5;
 }
 
+// ---- combatant / unit ----
+let _unitUid = 0;
 function combatant(name, classId, level, stats, slotIds, isPlayer) {
   const d = derive(stats);
   const c = {
+    uid: ++_unitUid,
     name: name, classId: classId, level: level, isPlayer: !!isPlayer,
     stats: stats,
-    abil: slotIds.map((id) => (id ? slotState(id) : null)),
     concepts: {},
     maxHp: d.maxHp, hp: d.maxHp, hpRegen: d.hpRegen,
     maxShield: d.maxShield, shield: d.maxShield,
@@ -57,18 +58,18 @@ function combatant(name, classId, level, stats, slotIds, isPlayer) {
     maxStam: d.maxStam, stam: d.maxStam, stamRegen: d.stamRegen,
     maxReson: d.maxReson, reson: 0, resonRegen: d.resonRegen,
     atkSpeed: d.atkSpeed, castSpeed: d.castSpeed,
-    status: {},          // key -> {secs} or {count}
-    counter: null,       // pending Counter Strike
-    fury: 0,             // Fury concept stacks
-    buckleAcc: 0,        // Buckle concept accumulator
-    dots: [], buffs: [], weaks: [],   // legacy draft-skill effects
+    status: {},
+    counter: null, fury: 0, buckleAcc: 0, flightAcc: 0,
+    panicked: false, itnTimer: 0,
+    dots: [], buffs: [], weaks: [],
   };
+  c.abil = slotIds.map((id) => (id ? slotState(c, id) : null));
   c.abil.forEach((s) => {
     if (s && abilityDef(s.id) && abilityDef(s.id).concept) c.concepts[s.id] = true;
   });
-  // concept build effects
   if (c.concepts['watched-over']) { c.maxHp += stats.fai; c.hp = c.maxHp; }
   if (c.concepts['diseased']) c.hpRegen = 0;
+  if (c.concepts['in-the-name-of']) c.resonRegen = 0;
   return c;
 }
 
@@ -85,6 +86,7 @@ function buildPlayer() {
   c.manaRegen += ub.manaRegen;
   c.maxReson += ub.reson;
   c.resonRegen += ub.resonRegen;
+  if (c.concepts['in-the-name-of']) c.resonRegen = 0;
   c.dmgByTag = ub.dmgByTag;
   return c;
 }
@@ -100,27 +102,50 @@ function rebuildPlayer() {
   np.reson = Math.min(old.reson, np.maxReson);
   np.dots = old.dots; np.buffs = old.buffs; np.weaks = old.weaks;
   np.status = old.status; np.counter = old.counter;
-  np.fury = old.fury; np.buckleAcc = old.buckleAcc;
+  np.fury = old.fury; np.buckleAcc = old.buckleAcc; np.flightAcc = old.flightAcc;
   const prev = {};
   old.abil.forEach((s) => { if (s) prev[s.id] = s; });
   np.abil.forEach((s) => {
     if (s && prev[s.id]) {
       const o = prev[s.id];
-      s.prog = o.prog; s.cd = o.cd; s.ammo = o.ammo; s.reloading = o.reloading; s.frozen = o.frozen;
-      s.followStacks = o.followStacks; s.hasten = o.hasten; s.rf = o.rf; s.freeUsed = o.freeUsed;
+      ['prog', 'cd', 'ammo', 'reloading', 'frozen', 'followStacks', 'hasten', 'rf', 'costMult', 'bonusBurst', 'sustaining']
+        .forEach((k) => (s[k] = o[k]));
     }
   });
   C.player = np;
 }
 
-function buildEnemy(g) {
-  const ed = genEnemy(g);
+function buildEnemyUnit(ed) {
   const c = combatant(ed.name, ed.id, 0, ed.stats, ed.abilities, false);
-  c.maxHp = ed.hp; c.hp = ed.hp;   // authored HP overrides the formula
-  c.bookTag = ed.bookTag;
+  c.maxHp = ed.hp; c.hp = ed.hp;
   if (ed.noRegen) c.hpRegen = 0;
   if (ed.noShield) { c.maxShield = 0; c.shield = 0; }
+  c.bookTag = ed.bookTag;
   return c;
+}
+
+function buildAlly(defId, forPlayer, g) {
+  if (ALLY_DEFS[defId] && ALLY_DEFS[defId].halfPlayer) {
+    const base = characterStats();
+    const stats = {}; STATS.forEach((s) => (stats[s] = Math.max(1, base[s] / 2)));
+    const a = combatant(ALLY_DEFS[defId].name, 'ally', 0, stats, ALLY_DEFS[defId].abilities, false);
+    a.isAlly = true; a.allyOfPlayer = true;
+    return a;
+  }
+  // page-def ally (a copy of an authored enemy)
+  const info = pageInfo(g);
+  const content = BOOKS[info.book].content;
+  let def = null;
+  content.forEach((ch) => ch.pages.forEach((p) => { if (p.id === defId) def = p; }));
+  if (!def) return null;
+  const ed = genEnemy(g); // same mult context
+  const filler = 3 + 2 * info.chapter + (info.book >= 1 ? 10 : 0);
+  const stats = {};
+  STATS.forEach((s) => { stats[s] = ((def.stats && def.stats[s]) || filler) * info.mult; });
+  const a = combatant(def.name, def.id, 0, stats, def.abilities, false);
+  a.maxHp = def.hp * info.mult; a.hp = a.maxHp;
+  a.isAlly = true; a.allyOfPlayer = !!forPlayer;
+  return a;
 }
 
 function startSession() {
@@ -130,74 +155,191 @@ function startSession() {
   newBattle();
   msgs.forEach(logMsg);
 }
-function endSession() {
-  G.session = false;
-  C = null;
-}
+function endSession() { G.session = false; C = null; }
 
 function newBattle() {
   const g = G.profile.node;
+  const ed = genEnemy(g);
+  G.profile.metEnemies[ed.id] = true;
+  const enemy = buildEnemyUnit(ed);
   C = {
-    node: g,
-    info: pageInfo(g),
-    player: buildPlayer(),
-    enemy: buildEnemy(g),
-    log: [],
-    over: false, fled: false,
+    node: g, info: pageInfo(g),
+    player: buildPlayer(), enemy: enemy,
+    pAllies: [], eAllies: [],
+    reverse: ed.reverse, silence: ed.silence,
+    log: [], over: false, fled: false, ending: false, noReward: false,
     elapsed: 0,
   };
-  logMsg(C.enemy.name + ' — ' + C.info.bookName + ', "' + C.info.chapterName + '", Page ' + C.info.page + '.');
+  // authored extras
+  ed.allies.forEach((aid) => { const a = buildAlly(aid, false, g); if (a) C.eAllies.push(a); });
+  ed.playerAllies.forEach((aid) => { const a = buildAlly(aid, true, g); if (a) C.pAllies.push(a); });
+  if (ed.dormant) enemy.dormant = true;
+  if (ed.startFeast) {
+    const fs = enemy.abil.find((s) => s && s.id === 'feast');
+    if (fs) fs.sustaining = { acc: 0, threshold: 0.10 * enemy.maxHp };
+  }
+  if (C.reverse) {
+    // she is halfway down and bleeding out the whole combat
+    enemy.hp = enemy.maxHp / 2;
+    addStatus(enemy, 'bleed', { dur: 9999, src: enemy });
+    addStatus(enemy, 'poison', { dur: 9999, src: enemy });
+  }
+  logMsg(enemy.name + ' — ' + C.info.bookName + ', "' + C.info.chapterName + '", Page ' + C.info.page + '.');
+  // Initiate abilities fire at the start of combat
+  allUnits().forEach((u) => { runInitiates(u); });
+}
+
+function allUnits() { return [C.player].concat(C.pAllies, [C.enemy], C.eAllies); }
+function sideUnits(unit) {
+  return (unit === C.player || unit.allyOfPlayer) ? [C.player].concat(C.pAllies) : [C.enemy].concat(C.eAllies);
+}
+function foeUnits(unit) {
+  return (unit === C.player || unit.allyOfPlayer) ? [C.enemy].concat(C.eAllies) : [C.player].concat(C.pAllies);
+}
+function aliveFoes(unit) { return foeUnits(unit).filter((u) => u.hp > 0); }
+function pickTarget(unit) { const f = aliveFoes(unit); return f.length ? pick(f) : null; }
+
+function runInitiates(u) {
+  u.abil.forEach((s) => {
+    if (!s) return;
+    const def = defFor(u, s.id);
+    if (!def || !def.initiate) return;
+    const target = pickTarget(u);
+    if (!target) return;
+    if (def.concept) {
+      if (def.initOps) applyOps(def.initOps, u, target, def.name + ' (Initiate)', def.tag, { mult: 1, extra: 0, isSkill: true });
+    } else {
+      castAbility(u, target, s, true, true);
+    }
+  });
 }
 
 function logMsg(s) { if (!C) return; C.log.push(s); if (C.log.length > 60) C.log.shift(); }
 
-// ---- statuses ----
-function stHas(side, key) { return !!side.status[key]; }
-function addStatus(side, key, dur, count) {
-  const meta = STATUSES[key];
-  if (meta.instant) return applyInstantStatus(side, key, dur);
-  if (meta.charge || count) {
-    const cur = side.status[key];
-    side.status[key] = { count: ((cur && cur.count) || 0) + (count || 1) };
-  } else {
-    const cur = side.status[key];
-    side.status[key] = { secs: Math.max((cur && cur.secs) || 0, dur || 1) };
+// ---- statuses (v2: stacks with snapshots) ----
+function statusMeta(key) { return STATUSES[key]; }
+function stEntry(unit, key) { return unit.status[key]; }
+function stHas(unit, key) {
+  const e = unit.status[key];
+  return !!e && ((e.count || 0) > 0 || (e.stacks && e.stacks.length > 0));
+}
+function stCount(unit, key) {
+  const e = unit.status[key];
+  if (!e) return 0;
+  return e.count != null ? e.count : (e.stacks ? e.stacks.length : 0);
+}
+function stMinSecs(unit, key) {
+  const e = unit.status[key];
+  if (!e || !e.stacks || !e.stacks.length) return 0;
+  return Math.min.apply(null, e.stacks.map((s) => s.secs));
+}
+// snapshot per-stack values from the inflictor's effective stats
+function snapshotFor(key, src) {
+  const s = src ? effStats(src) : emptyStatMap();
+  switch (key) {
+    case 'bleed': return { dps: 3 + 0.2 * s.str, burst: 6 + 0.4 * s.str };
+    case 'frost': return { hit: 1 + 0.1 * s.wis, purge: 3 + 0.3 * s.wis };
+    case 'poison': return { dps: 2 + 0.2 * s.dex };
+    case 'mindrot': return { dps: 3 + 0.3 * s.int };
+    case 'hemorrhage': return { dps: 5 + 0.4 * s.str };
+    case 'siphon': return { src: src };
+    default: return {};
   }
 }
-function consumeCharge(side, key) {
-  const st = side.status[key];
-  if (!st || !st.count) return false;
-  st.count -= 1;
-  if (st.count <= 0) delete side.status[key];
+function addStatus(unit, key, opts) {
+  opts = opts || {};
+  const meta = statusMeta(key);
+  if (!meta) return;
+  if (meta.kind === 'instant') return applyInstantStatus(unit, key, opts.dur || 1);
+  if (meta.kind === 'charge') {
+    const e = unit.status[key] || (unit.status[key] = { count: 0 });
+    e.count += opts.count || 1;
+    return;
+  }
+  const e = unit.status[key] || (unit.status[key] = { stacks: [] });
+  const n = (meta.kind === 'stack') ? (opts.stacks || 1) : 1;
+  for (let i = 0; i < n; i++) {
+    const st = snapshotFor(key, opts.src);
+    st.secs = opts.dur || 1;
+    if (key === 'unwavered') st.dr = (opts.valBase || 2) + (opts.valMult || 0) * ((opts.src ? effStats(opts.src)[opts.valStat || 'fai'] : 0) || 0);
+    if (key === 'enchant') { st.ench = opts.enchKey; st.enchDur = opts.enchDur; }
+    if (meta.kind === 'dur' && e.stacks.length) {
+      e.stacks[0].secs = Math.max(e.stacks[0].secs, st.secs); // refresh
+    } else {
+      e.stacks.push(st);
+    }
+  }
+  if (key === 'taunt') {
+    const live = unit.abil.filter((s) => s && !abilityDef(s.id).concept);
+    unit.tauntSlot = live.length ? pick(live) : null;
+  }
+  if (key === 'flight') unit.flightAcc = 0;
+  // Frost overload: 10+ stacks purge violently
+  if (key === 'frost') {
+    const fe = unit.status.frost;
+    if (fe && fe.stacks.length >= 10) {
+      const total = fe.stacks.reduce((a, s) => a + s.purge, 0);
+      delete unit.status.frost;
+      unit.hp -= total;
+      addStatus(unit, 'interrupted', { dur: 2 });
+      logMsg(unit.name + ' is overwhelmed by Frost! ' + Math.round(total) + ' damage and Interrupted.');
+    }
+  }
+}
+function consumeCharge(unit, key) {
+  const e = unit.status[key];
+  if (!e || !e.count) return false;
+  e.count -= 1;
+  if (e.count <= 0) delete unit.status[key];
   return true;
 }
-function applyInstantStatus(side, key, dur) {
-  const live = side.abil.filter((s) => s && !abilityDef(s.id).concept && (!s.ammo || s.ammo > 0));
+function removeOldestStack(unit, key) {
+  const e = unit.status[key];
+  if (!e || !e.stacks || !e.stacks.length) return;
+  let mi = 0;
+  e.stacks.forEach((s, i) => { if (s.secs < e.stacks[mi].secs) mi = i; });
+  e.stacks.splice(mi, 1);
+  if (!e.stacks.length) delete unit.status[key];
+}
+function cleanseOne(unit) {
+  const bad = Object.keys(unit.status).filter((k) => statusMeta(k).bad);
+  if (!bad.length) return false;
+  delete unit.status[pick(bad)];
+  return true;
+}
+function applyInstantStatus(unit, key, dur) {
+  const live = unit.abil.filter((s) => s && !abilityDef(s.id).concept && (!s.ammo || s.ammo > 0));
   if (!live.length) return;
   const s = pick(live);
-  if (key === 'nausea') { s.cd = Math.max(s.cd, dur); s.prog = 0; logMsg(side.name + '\'s ' + abilityDef(s.id).name + ' is disrupted by Nausea!'); }
-  if (key === 'concuss') { s.frozen = Math.max(s.frozen, dur); logMsg(side.name + '\'s ' + abilityDef(s.id).name + ' is Concussed!'); }
+  if (key === 'nausea') { s.cd = Math.max(s.cd, dur); s.prog = 0; logMsg(unit.name + '\'s ' + abilityDef(s.id).name + ' is disrupted by Nausea!'); }
+  if (key === 'concuss') { s.frozen = Math.max(s.frozen, dur); logMsg(unit.name + '\'s ' + abilityDef(s.id).name + ' is Concussed!'); }
 }
-// stats after multiplicative status buffs
-function effStats(side) {
+function effStats(unit) {
   const s = {};
-  STATS.forEach((k) => (s[k] = side.stats[k]));
-  if (stHas(side, 'enlarged')) { s.end *= 1.3; s.str *= 1.3; }
-  if (stHas(side, 'unburdened')) { s.str *= 1.2; s.agi *= 1.2; s.dex *= 1.2; }
+  STATS.forEach((k) => (s[k] = unit.stats[k]));
+  if (stHas(unit, 'enlarged')) { s.end *= 1.3; s.str *= 1.3; }
+  if (stHas(unit, 'unburdened')) { s.str *= 1.2; s.agi *= 1.2; s.dex *= 1.2; }
+  if (stHas(unit, 'burdened')) { s.str *= 0.8; s.agi *= 0.8; s.dex *= 0.8; }
   return s;
 }
-// live fill-speed multiplier for one slot ("Ability Speed")
-function slotSpeed(side, slot, def) {
+function slotSpeed(unit, slot, def) {
   if (def.concept) return 0;
-  if (slot.frozen > 0) return 0;
-  if (stHas(side, 'interrupted')) return 0;
-  let m = isSpell(def) ? side.castSpeed : side.atkSpeed;
-  if (stHas(side, 'frost')) m *= 0.9;
-  if (stHas(side, 'intimidated')) m *= 0.75;
-  if (stHas(side, 'dazed')) m *= CFG.dazedSlow;
-  if (stHas(side, 'agile') && isSkillAb(def)) m *= 1.3;
+  if (slot.frozen > 0 || slot.sustaining) return 0;
+  if (stHas(unit, 'interrupted')) return 0;
+  if (unit.dormant && unit.hp >= unit.maxHp) return 0;
+  if (C && C.silence && unit.isPlayer) return 0;
+  let m = isSpell(def) ? unit.castSpeed : unit.atkSpeed;
+  m *= Math.max(0, 1 - 0.10 * stCount(unit, 'frost'));
+  if (stHas(unit, 'intimidated')) m *= 0.75;
+  if (stHas(unit, 'terror')) m *= 0.5;
+  if (stHas(unit, 'dazed')) m *= CFG.dazedSlow;
+  if (stHas(unit, 'agile') && isSkillAb(def)) m *= 1.3;
+  if (stHas(unit, 'flight')) m *= 1.5;
+  if (stHas(unit, 'taunt') && unit.tauntSlot) m *= (slot === unit.tauntSlot ? 1.5 : 0.5);
   if (def.followUp && slot.followStacks > 0) m *= 1 + 0.25 * slot.followStacks;
   m *= slot.hasten || 1;
+  // Battle Conscious: attack speed floor at 100%
+  if (unit.concepts['battle-conscious'] && isSkillAb(def)) m = Math.max(m, unit.atkSpeed);
   return m;
 }
 
@@ -206,35 +348,46 @@ function opAmount(op, stats) {
   const sv = (op.stat ? (stats[op.stat] || 0) : 0) + (op.stat2 ? (stats[op.stat2] || 0) : 0);
   return Math.max(0, op.base + (op.mult || 0) * sv);
 }
-function buffAmt(side) { return side.buffs.reduce((a, b) => a + b.amt, 0); }
-function weakAmt(side) { return side.weaks.reduce((a, b) => a + b.amt, 0); }
-
-function earlyCost(def, prog) {
+function buffAmt(u) { return u.buffs.reduce((a, b) => a + b.amt, 0); }
+function weakAmt(u) { return u.weaks.reduce((a, b) => a + b.amt, 0); }
+function earlyCost(def, prog, slot) {
   const c = {};
+  const cm = (slot && slot.costMult) || 1;
   ['stam', 'mana', 'reson'].forEach((k) => {
-    if (def.cost[k]) c[k] = Math.max(0, Math.ceil(def.cost[k] * (1 - prog)));
+    if (def.cost[k]) c[k] = Math.max(0, Math.ceil(def.cost[k] * cm * (1 - prog)));
   });
   return c;
 }
-function canAfford(side, cost) {
-  return (side.stam >= (cost.stam || 0)) && (side.mana >= (cost.mana || 0)) && (side.reson >= (cost.reson || 0));
+function canAfford(u, cost) {
+  return (u.stam >= (cost.stam || 0)) && (u.mana >= (cost.mana || 0)) && (u.reson >= (cost.reson || 0));
 }
-function payCost(side, cost) {
-  side.stam = Math.max(0, side.stam - (cost.stam || 0));
-  side.mana = Math.max(0, side.mana - (cost.mana || 0));
-  side.reson = Math.max(0, side.reson - (cost.reson || 0));
+function payCost(u, cost) {
+  u.stam = Math.max(0, u.stam - (cost.stam || 0));
+  u.mana = Math.max(0, u.mana - (cost.mana || 0));
+  u.reson = Math.max(0, u.reson - (cost.reson || 0));
 }
 
 // ---- damage ----
 function dealDamage(caster, target, amt, opts) {
   opts = opts || {};
   amt = Math.max(0, amt + buffAmt(caster) - weakAmt(caster));
-  if (caster.concepts && caster.concepts['skittish']) amt *= 0.5; // Skittish deals half
-  if (target.concepts && target.concepts['skittish']) amt *= 0.5; // ...and receives half
+  if (caster.concepts['skittish']) amt *= 0.5;
+  if (target.concepts['skittish']) amt *= 0.5;
+  if (caster.concepts['berserk']) amt *= 1.4;
+  if (target.concepts['berserk']) amt *= 1.2;
   if (stHas(target, 'protection')) amt *= 0.75;
-  if (opts.isSkill && stHas(target, 'bruised')) amt *= 1.5;
+  if (opts.isSkill) amt *= 1 + 0.5 * stCount(target, 'bruised');
+  if (stHas(target, 'plummet')) { amt *= 1.5; consumeCharge(target, 'plummet'); }
+  // frost: extra damage per stack on each hit
+  if (!opts.isDot && stHas(target, 'frost')) {
+    amt += target.status.frost.stacks.reduce((a, s) => a + s.hit, 0);
+  }
+  if (stHas(target, 'unwavered')) {
+    amt = Math.max(0, amt - target.status.unwavered.stacks[0].dr);
+  }
   if (amt <= 0) return 0;
   let toShield = 0;
+  const shieldWas = target.shield;
   if (!opts.isDot && !opts.pierce && target.shield > 0) {
     toShield = Math.min(target.shield, amt / 2);
     target.shield -= toShield;
@@ -244,10 +397,32 @@ function dealDamage(caster, target, amt, opts) {
   if (opts.leech && toHp > 0) {
     caster.hp = Math.min(caster.maxHp, caster.hp + Math.max(1, toHp * opts.leech));
   }
-  // on-receive effects
   if (!opts.isDot) {
-    if (!target.concepts['disciplined']) addStatus(target, 'dazed', CFG.dazedSecs);
+    // caster's stealth breaks when dealing damage
+    if (stHas(caster, 'stealth')) delete caster.status.stealth;
+    // enchants: hits inflict the enchanted condition
+    if (stHas(caster, 'enchant')) {
+      caster.status.enchant.stacks.forEach((en) => {
+        addStatus(target, en.ench, { dur: en.enchDur, src: caster });
+      });
+    }
+    // guard breaker: shield fully depleted by this hit
+    if (caster.concepts['guard-breaker'] && shieldWas > 0 && target.shield <= 0) {
+      addStatus(target, 'interrupted', { dur: 2 });
+      addStatus(target, 'bleed', { dur: 3, src: caster });
+      logMsg(caster.name + ' breaks the guard!');
+    }
+    // on-receive effects
+    if (!target.concepts['disciplined']) addStatus(target, 'dazed', { dur: CFG.dazedSecs });
     if (target.concepts['fury']) target.fury += 1;
+    if (stHas(target, 'latch')) addStatus(target, 'bleed', { dur: 5, src: caster });
+    if (stHas(target, 'fracture')) addStatus(target, 'bruised', { dur: 5, src: caster });
+    if (target.concepts['panic'] && !target.panicked && target.hp <= target.maxHp * 0.5) {
+      target.panicked = true;
+      addStatus(target, 'agile', { dur: 9999 });
+      addStatus(target, 'confusion', { count: 99 });
+      logMsg(target.name + ' panics!');
+    }
     if (target.concepts['buckle']) {
       target.buckleAcc += amt;
       if (target.buckleAcc >= 0.2 * target.maxHp) {
@@ -258,14 +433,44 @@ function dealDamage(caster, target, amt, opts) {
         logMsg(target.name + ' Buckles! Max health crushed.');
       }
     }
-    if (target.counter && !opts.isCounter && target.hp > 0) {
+    // flight: enough damage knocks you out of the air
+    if (stHas(target, 'flight')) {
+      target.flightAcc += amt;
+      if (target.flightAcc >= 0.2 * target.maxHp) {
+        delete target.status.flight;
+        addStatus(target, 'plummet', { count: 3 });
+        logMsg(target.name + ' Plummets!');
+      }
+    }
+    // sustains accumulate damage and can break
+    target.abil.forEach((s) => {
+      if (!s || !s.sustaining) return;
+      s.sustaining.acc += amt;
+      if (s.sustaining.acc >= s.sustaining.threshold) {
+        s.sustaining = null;
+        s.cd = cooldownOf(target, defFor(target, s.id));
+        logMsg(target.name + '\'s ' + abilityDef(s.id).name + ' is broken!');
+      }
+    });
+    if (stHas(target, 'repent') && !opts.isReflect && target.hp > 0) {
+      const back = amt * 0.5;
+      logMsg(target.name + ' repents ' + Math.round(back) + ' damage back!');
+      dealDamage(target, caster, back, { kind: 'mag', isReflect: true });
+    }
+    if (target.counter && !opts.isReflect && target.hp > 0) {
       const cs = target.counter; target.counter = null;
       const reflect = amt * cs.pct + cs.base + cs.mult * (effStats(target)[cs.stat] || 0);
       logMsg(target.name + ' counters for ' + Math.round(reflect) + '!');
-      dealDamage(target, caster, reflect, { kind: 'phys', isCounter: true, isSkill: true });
+      dealDamage(target, caster, reflect, { kind: 'phys', isReflect: true, isSkill: true });
     }
   }
   return amt;
+}
+
+function healUnit(u, n) {
+  if (stHas(u, 'hemorrhage')) n *= 0.5;
+  u.hp = Math.min(u.maxHp, u.hp + n);
+  return n;
 }
 
 function applyOps(ops, caster, target, label, tag, ctx) {
@@ -280,12 +485,19 @@ function applyOps(ops, caster, target, label, tag, ctx) {
         let dmg = n * CFG.dmgScale + tagDmg;
         if (firstDmg) { dmg += ctx.extra; firstDmg = false; }
         dmg *= ctx.mult;
+        if (C.reverse && caster.isPlayer) {
+          const healed = healUnit(target, dmg);
+          out.push('+' + Math.round(healed) + ' stabilized');
+          break;
+        }
         const dealt = dealDamage(caster, target, dmg, { kind: op.kind, pierce: op.pierce, leech: op.leech, isSkill: ctx.isSkill });
-        out.push(Math.round(dealt) + ' dmg' + (op.pierce ? ' (pierce)' : ''));
+        if (op.recoil && dealt > 0) { caster.hp -= dealt * op.recoil; out.push(Math.round(dealt) + ' dmg (recoil ' + Math.round(dealt * op.recoil) + ')'); }
+        else out.push(Math.round(dealt) + ' dmg' + (op.pierce ? ' (pierce)' : ''));
         break;
       }
-      case 'heal':
-        caster.hp = Math.min(caster.maxHp, caster.hp + n); out.push('+' + Math.round(n) + ' HP'); break;
+      case 'heal': {
+        const h = healUnit(caster, n); out.push('+' + Math.round(h) + ' HP'); break;
+      }
       case 'shield': {
         const cap = op.overcap ? Infinity : caster.maxShield;
         caster.shield = Math.min(cap, caster.shield + n);
@@ -293,14 +505,18 @@ function applyOps(ops, caster, target, label, tag, ctx) {
       }
       case 'st': {
         const who = op.to === 'self' ? [caster] : op.to === 'both' ? [caster, target] : [target];
-        who.forEach((w) => addStatus(w, op.key, op.dur, op.count));
-        out.push(STATUSES[op.key].name + (op.dur ? ' ' + op.dur : op.count ? ' ×' + op.count : '') +
-          (op.to === 'self' ? '' : op.to === 'both' ? ' (everyone)' : '')); break;
+        who.forEach((w) => addStatus(w, op.key, {
+          dur: op.dur, count: op.count, stacks: op.stacks, src: caster,
+          valBase: op.valBase, valMult: op.valMult, valStat: op.valStat,
+          enchKey: op.enchKey, enchDur: op.enchDur,
+        }));
+        const stx = (op.stacks && op.stacks > 1) ? op.stacks + '×' : (op.count && op.count > 1) ? op.count + '×' : '';
+        out.push(stx + STATUSES[op.key].name + (op.dur ? ' ' + op.dur : ''));
+        break;
       }
       case 'dot': {
-        const lbl = op.label || 'DoT';
-        target.dots.push({ dps: n * CFG.dmgScale, secs: op.secs, label: lbl });
-        out.push(lbl + ' ' + Math.round(n) + '/s x' + op.secs + 's'); break;
+        target.dots.push({ dps: n * CFG.dmgScale, secs: op.secs, label: op.label || 'DoT' });
+        out.push((op.label || 'DoT') + ' ' + Math.round(n) + '/s x' + op.secs + 's'); break;
       }
       case 'buff':
         caster.buffs.push({ amt: n, secs: op.secs }); out.push('+' + Math.round(n) + ' dmg ' + op.secs + 's'); break;
@@ -313,14 +529,17 @@ function applyOps(ops, caster, target, label, tag, ctx) {
 
 // ---- descriptions ----
 function describeOps(ops, stats) {
-  return ops.map((op) => {
+  return (ops || []).map((op) => {
     const n = Math.round(opAmount(op, stats));
     switch (op.t) {
-      case 'dmg': return 'Deal ' + n + (op.kind === 'mag' ? ' magic' : ' physical') + (op.pierce ? ' (pierce)' : '') + (op.leech ? ', heal ' + Math.round(op.leech * 100) + '%' : '');
+      case 'dmg': return 'Deal ' + n + (op.kind === 'mag' ? ' magic' : ' physical') + (op.pierce ? ' (pierce)' : '') + (op.recoil ? ', recoil ' + Math.round(op.recoil * 100) + '%' : '') + (op.leech ? ', heal ' + Math.round(op.leech * 100) + '%' : '');
       case 'heal': return 'Heal ' + n;
       case 'shield': return '+' + n + ' shield' + (op.overcap ? ' (can Overcap)' : '');
-      case 'st': return (op.to === 'self' ? 'Gain ' : op.to === 'both' ? 'Everyone gains ' : 'Inflict ') +
-        STATUSES[op.key].name + (op.dur ? ' ' + op.dur : op.count ? ' ×' + op.count : '');
+      case 'st': {
+        const stx = (op.stacks && op.stacks > 1) ? op.stacks + '×' : (op.count && op.count > 1) ? op.count + '×' : '';
+        return (op.to === 'self' ? 'Gain ' : op.to === 'both' ? 'Everyone gains ' : 'Inflict ') +
+          stx + STATUSES[op.key].name + (op.dur ? ' ' + op.dur : '');
+      }
       case 'dot': return (op.label || 'DoT') + ' ' + n + '/s for ' + op.secs + 's';
       case 'buff': return '+' + n + ' damage ' + op.secs + 's';
       case 'weaken': return 'Enemy -' + n + ' damage ' + op.secs + 's';
@@ -328,14 +547,15 @@ function describeOps(ops, stats) {
     return '';
   }).join(' · ');
 }
-function formulaOps(ops, side) {
-  return ops.map((op) => {
+function formulaOps(ops, unit) {
+  return (ops || []).map((op) => {
     if (op.t === 'st') {
-      return STATUSES[op.key].name + (op.dur ? ' ' + op.dur : op.count ? ' ×' + op.count : '') + ' — ' + STATUSES[op.key].desc +
+      const stx = (op.stacks && op.stacks > 1) ? op.stacks + '×' : (op.count && op.count > 1) ? op.count + '×' : '';
+      return '[[' + op.key + ']]' + stx + STATUSES[op.key].name + (op.dur ? ' ' + op.dur : '') + ' — ' + STATUSES[op.key].desc +
         (op.to === 'self' ? ' (on you)' : op.to === 'both' ? ' (on everyone)' : '');
     }
     let f = '' + op.base;
-    const es = effStats(side);
+    const es = effStats(unit);
     if (op.mult && op.stat) f += ' + ' + op.mult + '×' + STAT_INFO[op.stat].abbr + '(' + Math.round(es[op.stat] || 0) + ')';
     if (op.mult && op.stat2) f += ' + ' + op.mult + '×' + STAT_INFO[op.stat2].abbr + '(' + Math.round(es[op.stat2] || 0) + ')';
     const n = Math.round(opAmount(op, es));
@@ -355,86 +575,132 @@ function costText(cost) {
 }
 
 // ---- activation ----
-function castAbility(side, foe, slot, free) {
-  const def = abilityDef(slot.id);
+function castAbility(unit, target, slot, free, isInitiate) {
+  const def = defFor(unit, slot.id);
   if (!def || def.concept) return false;
-  if (stHas(side, 'blind')) return false;
+  if (C.silence && unit.isPlayer) return false;
   if (slot.ammo !== null && slot.ammo <= 0) return false;
+  if (slot.sustaining) return false;
   if (!free) {
-    let cost = earlyCost(def, slot.prog);
-    if (def.firstFree && !slot.freeUsed) cost = {};
-    if (!canAfford(side, cost)) return false;
-    payCost(side, cost);
+    const cost = earlyCost(def, slot.prog, slot);
+    if (!canAfford(unit, cost)) return false;
+    payCost(unit, cost);
   }
-  if (def.firstFree) slot.freeUsed = true;
   slot.prog = 0;
-  if (slot.ammo !== null) {
+  const bursts = 1 + burstOf(def, slot);
+  // cooldown handling
+  if (def.sustain) {
+    slot.sustaining = { acc: 0, threshold: def.sustain.thresholdPct * unit.maxHp };
+  } else if (slot.ammo !== null) {
     slot.ammo -= 1;
-    if (slot.ammo > 0) {
-      // Charge abilities have no cooldown while charges remain
-      slot.cd = def.charge ? 0 : cooldownOf(side, def);
-    } else {
-      slot.cd = rechargeCd(side, def); // long refill, then ammo/charges restore
-      slot.reloading = true;
-    }
+    if (slot.ammo > 0) slot.cd = def.charge ? 0 : cooldownOf(unit, def) * bursts;
+    else { slot.cd = rechargeCd(unit, def); slot.reloading = true; }
   } else {
-    slot.cd = cooldownOf(side, def);
+    slot.cd = cooldownOf(unit, def) * bursts;
   }
-  // reveal enemy abilities on first activation
-  if (!side.isPlayer && G.profile && !G.profile.seen[slot.id]) { G.profile.seen[slot.id] = true; save(); }
+  if (!unit.isPlayer && !unit.isAlly && G.profile && !G.profile.seen[slot.id]) { G.profile.seen[slot.id] = true; save(); }
 
   // specials
   if (def.special === 'flee') {
-    logMsg(side.name + ' flees! No victory, no spoils.');
+    logMsg(unit.name + ' flees! No victory, no spoils.');
     C.over = true; C.fled = true; C.restartAt = C.elapsed + 1.0;
     return true;
   }
+  if (def.special === 'endwin') {
+    logMsg(unit.name + ' • ' + def.name);
+    C.ending = true; C.noReward = true; C.endAt = C.elapsed + 3;
+    return true;
+  }
   if (def.special === 'counter') {
-    side.counter = { pct: 0.5, base: 3, mult: 1.1, stat: 'str' };
-    logMsg(side.name + ' • ' + def.name + ': braced to counter!');
+    unit.counter = { pct: 0.5, base: 3, mult: 1.1, stat: 'str' };
+    logMsg(unit.name + ' • ' + def.name + ': braced to counter!');
+    return true;
+  }
+  if (def.special === 'sonic') {
+    let best = null;
+    unit.abil.forEach((s) => {
+      if (!s || abilityDef(s.id).concept) return;
+      const d2 = defFor(unit, s.id);
+      if (!d2.cost.stam) return;
+      if (!best || d2.cost.stam > defFor(unit, best.id).cost.stam) best = s;
+    });
+    if (best) { best.bonusBurst += 1; logMsg(unit.name + ' • ' + def.name + ': ' + abilityDef(best.id).name + ' gains Burst!'); }
+    return true;
+  }
+  if (def.special === 'hatred') {
+    ['str', 'end', 'dex', 'agi', 'int', 'wis', 'fai', 'pie'].forEach((k) => (unit.stats[k] += 10));
+    logMsg(unit.name + ' • ' + def.name + ': its hatred grows...');
+    return true;
+  }
+  if (def.special === 'cleanse') { cleanseOne(unit); }
+  if (def.rally) {
+    const mySide = (unit === C.player || unit.allyOfPlayer) ? C.pAllies : C.eAllies;
+    if (mySide.length < CFG.maxAllies) {
+      const clone = buildAlly(unit.classId, unit === C.player || unit.allyOfPlayer, C.node);
+      if (clone) { mySide.push(clone); logMsg('Another ' + clone.name + ' joins the fight!'); }
+    }
+    slot.costMult = (slot.costMult || 1) * 2; // mana cost doubles for the rest of combat
     return true;
   }
   if (def.speedLink) {
-    side.abil.forEach((s) => { if (s && s.id === def.speedLink.id) s.hasten = def.speedLink.mult; });
+    unit.abil.forEach((s) => { if (s && s.id === def.speedLink.id) s.hasten = def.speedLink.mult; });
+  }
+  if (def.sustain) {
+    if (slot.id === 'feast') logMsg(unit.name + ' begins to Feast...');
+    return true;
   }
 
-  // damaging-ability pre-checks
   const damaging = def.full.some((op) => op.t === 'dmg');
-  const ctx = { mult: 1, extra: 0, isSkill: isSkillAb(def) };
-  let target = foe;
-  if (damaging) {
-    if (consumeCharge(side, 'guilt')) { ctx.mult *= 0.5; logMsg(side.name + ' holds back (Guilt).'); }
-    if (consumeCharge(side, 'confusion') && Math.random() < 0.5) {
-      target = side; logMsg(side.name + ' is Confused and lashes out at... themselves!');
+  for (let b = 0; b < bursts; b++) {
+    const ctx = { mult: 1, extra: 0, isSkill: isSkillAb(def) };
+    let tgt = target && target.hp > 0 ? target : pickTarget(unit);
+    if (!tgt) break;
+    if (damaging) {
+      // blind: 30% chance to miss
+      if (stHas(unit, 'blind') && Math.random() < 0.3) { logMsg(unit.name + ' misses ' + def.name + ' (Blind)!'); continue; }
+      if (consumeCharge(unit, 'guilt')) { ctx.mult *= 0.5; logMsg(unit.name + ' holds back (Guilt).'); }
+      if (consumeCharge(unit, 'confusion') && Math.random() < 0.5) {
+        tgt = unit; logMsg(unit.name + ' is Confused and lashes out at... themselves!');
+      }
+      if (unit.status.empower && unit.status.empower.count) { ctx.extra += effStats(unit).pie; consumeCharge(unit, 'empower'); }
+      if (unit.concepts['repeating-focus'] && isSpell(def)) { ctx.extra += slot.rf; slot.rf += 1; }
+      if (unit.concepts['fury'] && ctx.isSkill && def.tag === 'str') ctx.extra += unit.fury;
+      if (unit.concepts['arcane-crafted'] && free && !isInitiate && isSpell(def)) ctx.mult *= 1.5;
+      if (isInitiate && def.initDmgMult) ctx.mult *= def.initDmgMult;
+      if (tgt !== unit && stHas(tgt, 'stealth') && !C.reverse) { logMsg(tgt.name + ' is hidden — ' + def.name + ' misses!'); continue; }
+      if (tgt !== unit && stHas(tgt, 'shrink') && Math.random() < 0.2) { logMsg(tgt.name + ' dodges ' + def.name + '!'); continue; }
+      if (unit.concepts['skittish'] && tgt !== unit && Math.random() < 0.5) { logMsg(unit.name + ' skitters and misses!'); continue; }
+      if (tgt !== unit && tgt.concepts['skittish'] && Math.random() < 0.5) { logMsg(tgt.name + ' skitters away!'); continue; }
+      // bounty hunter: overkill pays out
+      if (def.special === 'bounty' && unit.isPlayer) {
+        const before = tgt.hp;
+        applyOps(isInitiate && def.initOps ? def.initOps.concat(def.full) : def.full, unit, tgt, def.name, def.tag, ctx);
+        if (tgt.hp <= 0 && before > 0) {
+          const over = Math.round(-tgt.hp);
+          if (over > 0) { G.profile.gold += over; logMsg('Bounty! +' + over + ' overkill gold.'); }
+        }
+        continue;
+      }
     }
-    if (side.status.empower && side.status.empower.count) {
-      ctx.extra += effStats(side).pie; consumeCharge(side, 'empower');
-    }
-    if (side.concepts['repeating-focus'] && isSpell(def)) { ctx.extra += slot.rf; slot.rf += 1; }
-    if (side.concepts['fury'] && isSkillAb(def) && def.tag === 'str') ctx.extra += side.fury;
-    if (target !== side && stHas(target, 'shrink') && Math.random() < 0.2) {
-      logMsg(target.name + ' dodges ' + def.name + '!');
-      return true;
-    }
-    // Skittish: chance to hit and be hit is halved
-    if (side.concepts['skittish'] && target !== side && Math.random() < 0.5) {
-      logMsg(side.name + ' skitters and misses ' + def.name + '!');
-      return true;
-    }
-    if (target !== side && target.concepts['skittish'] && Math.random() < 0.5) {
-      logMsg(target.name + ' skitters away from ' + def.name + '!');
-      return true;
-    }
+    const ops = isInitiate && def.initOps ? def.initOps.concat(def.full) : def.full;
+    applyOps(ops, unit, tgt, def.name + (isInitiate ? ' (Initiate)' : ''), def.tag, ctx);
+    // bleed bursts when the BLEEDING unit activates — handled for the caster below
   }
-  applyOps(def.full, side, target, def.name, def.tag, ctx);
+  // activating any ability triggers your own bleed burst
+  if (stHas(unit, 'bleed')) {
+    const e = unit.status.bleed;
+    const total = e.stacks.reduce((a, s) => a + s.burst, 0);
+    unit.hp -= total;
+    removeOldestStack(unit, 'bleed');
+    logMsg(unit.name + ' bleeds for ' + Math.round(total) + '!');
+  }
   if (damaging) {
-    // follow-up stacks build on OTHER skills' damage; reset when the follow-up itself hits
-    side.abil.forEach((s) => {
+    unit.abil.forEach((s) => {
       if (!s || !abilityDef(s.id).followUp) return;
       if (s === slot) s.followStacks = 0;
-      else if (ctx.isSkill) s.followStacks += 1;
+      else if (isSkillAb(def)) s.followStacks += 1;
     });
-    if (slot.hasten > 1) slot.hasten = 1; // speedLink boost spent once it deals damage
+    if (slot.hasten > 1) slot.hasten = 1;
   }
   return true;
 }
@@ -442,54 +708,90 @@ function castAbility(side, foe, slot, free) {
 function playerActivate(slotIdx) {
   if (!C || C.over) return;
   const slot = C.player.abil[slotIdx];
-  if (!slot || slot.cd > 0 || slot.frozen > 0) return;
-  const def = abilityDef(slot.id);
+  if (!slot || slot.cd > 0 || slot.frozen > 0 || slot.sustaining) return;
+  const def = defFor(C.player, slot.id);
   if (!def || def.concept) return;
-  castAbility(C.player, C.enemy, slot, false);
+  castAbility(C.player, pickTarget(C.player), slot, false);
   checkEnd();
 }
 
-// ---- per-frame update ----
-function regenSide(side, dt) {
-  // status timers
-  Object.keys(side.status).forEach((k) => {
-    const st = side.status[k];
-    if (st.secs != null) { st.secs -= dt; if (st.secs <= 0) delete side.status[k]; }
+// ---- per-frame ----
+function regenUnit(u, dt) {
+  // status stack timers
+  Object.keys(u.status).forEach((k) => {
+    const e = u.status[k];
+    if (!e.stacks) return;
+    e.stacks = e.stacks.filter((s) => (s.secs -= dt) > 0);
+    if (!e.stacks.length) delete u.status[k];
   });
-  // health regen with modifiers
-  let hpReg = side.hpRegen;
-  if (stHas(side, 'frost')) hpReg *= 0.5;
-  if (stHas(side, 'poison')) hpReg = 0;
-  side.hp = Math.min(side.maxHp, side.hp + hpReg * dt);
-  if (stHas(side, 'poison')) side.hp -= 0.01 * side.maxHp * dt;
-  if (stHas(side, 'regen')) side.hp = Math.min(side.maxHp, side.hp + 0.05 * side.maxHp * dt);
-  side.mana = Math.min(side.maxMana, side.mana + side.manaRegen * dt);
-  side.stam = Math.min(side.maxStam, side.stam + side.stamRegen * dt);
-  side.reson = Math.min(side.maxReson, side.reson + side.resonRegen * dt);
-  // overcapped shield decays 1% of the excess per second
-  if (side.shield > side.maxShield) {
-    const excess = side.shield - side.maxShield;
-    side.shield = side.maxShield + excess * Math.max(0, 1 - 0.01 * dt);
+  if (!stHas(u, 'taunt')) u.tauntSlot = null;
+  // hp regen with modifiers
+  let hpReg = u.hpRegen;
+  if (stCount(u, 'frost') > 0) hpReg *= 0.5;
+  if (stHas(u, 'poison')) hpReg = 0;
+  if (hpReg > 0) healUnit(u, hpReg * dt);
+  if (stHas(u, 'regen')) healUnit(u, 0.05 * u.maxHp * dt);
+  // sustained Feast grants regen
+  u.abil.forEach((s) => { if (s && s.sustaining && s.id === 'feast') healUnit(u, 0.05 * u.maxHp * dt); });
+  // damaging stacks
+  if (stHas(u, 'poison')) {
+    u.hp -= 0.01 * u.maxHp * dt;
+    u.hp -= u.status.poison.stacks.reduce((a, s) => a + s.dps, 0) * dt;
   }
-  side.buffs = side.buffs.filter((b) => (b.secs -= dt) > 0);
-  side.weaks = side.weaks.filter((w) => (w.secs -= dt) > 0);
-  side.dots = side.dots.filter((d) => {
-    side.hp -= d.dps * Math.min(dt, d.secs);
+  if (stHas(u, 'bleed')) u.hp -= u.status.bleed.stacks.reduce((a, s) => a + s.dps, 0) * dt;
+  if (stHas(u, 'hemorrhage')) u.hp -= u.status.hemorrhage.stacks.reduce((a, s) => a + s.dps, 0) * dt;
+  if (stHas(u, 'mindrot')) {
+    const dps = u.status.mindrot.stacks.reduce((a, s) => a + s.dps, 0);
+    u.hp -= dps * dt;
+    u.mana -= dps * dt;
+    if (u.mana <= 0) {
+      u.mana = 0;
+      delete u.status.mindrot;
+      u.hp = u.hp / 2;
+      logMsg(u.name + '\'s mind fractures! Half their health is lost.');
+    }
+  }
+  if (stHas(u, 'siphon')) {
+    u.status.siphon.stacks.forEach((s) => {
+      const drain = 0.03 * u.maxHp * dt;
+      u.hp -= drain;
+      if (s.src && s.src.hp > 0) healUnit(s.src, drain);
+    });
+  }
+  u.mana = Math.min(u.maxMana, u.mana + u.manaRegen * dt);
+  u.stam = Math.min(u.maxStam, u.stam + u.stamRegen * dt);
+  u.reson = Math.min(u.maxReson, u.reson + u.resonRegen * dt);
+  if (u.shield > u.maxShield) {
+    const excess = u.shield - u.maxShield;
+    u.shield = u.maxShield + excess * Math.max(0, 1 - 0.01 * dt);
+  }
+  // concept ticks
+  if (u.concepts['in-the-name-of']) {
+    u.itnTimer += dt;
+    while (u.itnTimer >= 2) { u.itnTimer -= 2; addStatus(u, 'empower', { count: 1 }); }
+  }
+  if (u.concepts['holier-than-thou'] && u.reson >= u.maxReson - 0.01) {
+    const foe = pickTarget(u);
+    if (foe) dealDamage(u, foe, u.resonRegen * dt, { kind: 'mag', isDot: true });
+  }
+  u.buffs = u.buffs.filter((b) => (b.secs -= dt) > 0);
+  u.weaks = u.weaks.filter((w) => (w.secs -= dt) > 0);
+  u.dots = u.dots.filter((d) => {
+    u.hp -= d.dps * Math.min(dt, d.secs);
     d.secs -= dt;
     return d.secs > 0;
   });
 }
 
-function advanceBars(side, foe, dt) {
-  // cooldown tick rate (Momentum Shift)
+function advanceBars(u, dt) {
   let cdRate = 1;
-  if (stHas(side, 'cdfast')) cdRate *= 1.25;
-  if (stHas(side, 'cdslow')) cdRate *= 0.8;
-  for (let i = 0; i < side.abil.length; i++) {
-    const s = side.abil[i];
+  if (stHas(u, 'cdfast')) cdRate *= 1.25;
+  if (stHas(u, 'cdslow')) cdRate *= 0.8;
+  for (let i = 0; i < u.abil.length; i++) {
+    const s = u.abil[i];
     if (!s) continue;
-    const def = abilityDef(s.id);
-    if (!def || def.concept) continue;
+    const def = defFor(u, s.id);
+    if (!def || def.concept || s.sustaining) continue;
     if (s.frozen > 0) { s.frozen = Math.max(0, s.frozen - dt); continue; }
     if (s.cd > 0) {
       s.cd = Math.max(0, s.cd - dt * cdRate);
@@ -497,18 +799,16 @@ function advanceBars(side, foe, dt) {
       continue;
     }
     if (s.ammo !== null && s.ammo <= 0) {
-      // safety: reload finished elsewhere or never started
       if (s.reloading) continue;
       s.ammo = def.ammo;
     }
-    const speed = slotSpeed(side, s, def);
+    const speed = slotSpeed(u, s, def);
     if (speed <= 0) continue;
-    s.prog += dt * speed / fillTimeOf(side, def);
+    s.prog += dt * speed / fillTimeOf(u, def, s);
     if (s.prog >= 1) {
       s.prog = 1;
-      if (stHas(side, 'blind')) continue; // ready, waiting for Blind to end
-      castAbility(side, foe, s, true);
-      if (C.over || foe.hp <= 0 || side.hp <= 0) return;
+      castAbility(u, pickTarget(u), s, true);
+      if (C.over || C.player.hp <= 0 || C.enemy.hp <= 0) return;
     }
   }
 }
@@ -516,21 +816,41 @@ function advanceBars(side, foe, dt) {
 function combatTick(dt) {
   if (!C || C.over) return;
   C.elapsed += dt;
-  regenSide(C.player, dt);
-  regenSide(C.enemy, dt);
+  if (C.ending && C.elapsed >= C.endAt) {
+    C.over = true;
+    if (C.noReward) { recordWin(); checkCompletions().forEach(logMsg); autoAdvanceAfterWin(); save(); }
+    C.restartAt = C.elapsed + 1.0;
+    return;
+  }
+  allUnits().forEach((u) => { if (u.hp > 0) regenUnit(u, dt); });
+  C.pAllies = C.pAllies.filter((a) => a.hp > 0);
+  C.eAllies = C.eAllies.filter((a) => a.hp > 0);
   if (checkEnd()) return;
-  advanceBars(C.player, C.enemy, dt);
-  if (checkEnd()) return;
-  advanceBars(C.enemy, C.player, dt);
+  allUnits().forEach((u) => { if (u.hp > 0 && !C.over) advanceBars(u, dt); });
+  C.pAllies = C.pAllies.filter((a) => a.hp > 0);
+  C.eAllies = C.eAllies.filter((a) => a.hp > 0);
   checkEnd();
 }
 
 // ---- resolution ----
 function checkEnd() {
   if (!C || C.over) return C && C.over;
-  if (C.enemy.hp <= 0) { onWin(); return true; }
+  if (C.ending) return false;
+  if (C.reverse) {
+    if (C.enemy.hp <= 0) { C.over = true; logMsg('She didn\'t make it... You couldn\'t save her.'); C.restartAt = C.elapsed + 1.5; return true; }
+    if (C.player.hp <= 0) { onLoss(); return true; }
+    return false;
+  }
+  if (C.enemy.hp <= 0 && C.eAllies.every((a) => a.hp <= 0)) { onWin(); return true; }
   if (C.player.hp <= 0) { onLoss(); return true; }
   return false;
+}
+
+function autoAdvanceAfterWin() {
+  const g = G.profile.node;
+  if (G.profile.autoTravel && winsOn(g) === reqFor(g) && g < TOTAL_PAGES - 1) {
+    if (travel(1)) logMsg('Requirement met — moving ahead!');
+  }
 }
 
 function onWin() {
@@ -544,8 +864,7 @@ function onWin() {
   const gold = goldFor(g);
   G.profile.gold += gold;
   let msg = 'Victory! +' + xp + ' XP, +' + gold + ' gold';
-  // gear & rune level follow the CHAPTER (chapter 5 drops L5 gear)
-  const dropLvl = C.info.chapter;
+  const dropLvl = C.info.gearLvl;
   if (Math.random() < CFG.dropChance) {
     if (invFull()) msg += ' — an item drops but your bag is full!';
     else { const it = genItem(dropLvl); G.profile.inventory.push(it); msg += ' — ' + it.name + ' (L' + it.level + ') drops!'; }
@@ -555,15 +874,12 @@ function onWin() {
     else { const ru = genRune(dropLvl); G.profile.inventory.push(ru); msg += ' — Rune of ' + STAT_INFO[ru.stat].name + '!'; }
   }
   if (Math.random() < CFG.tomeChance) {
-    const tome = genTome(); // tomes always fit, even in a full bag
+    const tome = genTome();
     if (tome) { G.profile.inventory.push(tome); msg += ' — a TOME drops!'; }
   }
   logMsg(msg + ' (' + winsOn(g) + '/' + reqFor(g) + ' wins)');
   checkCompletions().forEach(logMsg);
-  // auto-advance the moment the requirement is met
-  if (G.profile.autoTravel && winsOn(g) === reqFor(g) && g < TOTAL_PAGES - 1) {
-    if (travel(1)) logMsg('Requirement met — moving ahead!');
-  }
+  autoAdvanceAfterWin();
   save();
   C.restartAt = C.elapsed + 1.0;
 }
