@@ -32,6 +32,8 @@ function newProfile() {
     upgrades: {},
     maxLevel: {},
     prestiged: {},
+    mastered: {},
+    autoSalv: { noMult: false, noMax: false, extract: false },
     skills: [],
     tomeSkills: [],
     slots: new Array(CFG.slotCount).fill(null),
@@ -69,8 +71,9 @@ function load() {
     save();
   }
   Object.keys(CLASSES).forEach((id) => { if (G.profile.classXp[id] == null) G.profile.classXp[id] = 0; });
-  ['upgrades', 'maxLevel', 'prestiged', 'wins', 'equipment', 'seen', 'metEnemies',
+  ['upgrades', 'maxLevel', 'prestiged', 'mastered', 'wins', 'equipment', 'seen', 'metEnemies',
    'chapterClears', 'completedThisRun', 'enhance'].forEach((k) => { if (!G.profile[k]) G.profile[k] = {}; });
+  if (!G.profile.autoSalv) G.profile.autoSalv = { noMult: false, noMax: false, extract: false };
   ['inventory', 'tomeSkills', 'pendingDrafts', 'skills', 'sacrificed'].forEach((k) => { if (!G.profile[k]) G.profile[k] = []; });
   if (G.profile.gold == null) G.profile.gold = 0;
   if (G.profile.ep == null) G.profile.ep = 0;
@@ -108,8 +111,26 @@ function prestigeCount() {
   let n = 0; for (const k in G.profile.prestiged) if (G.profile.prestiged[k]) n++; return n;
 }
 function prestigeSpeedMult() { return 1 + CFG.prestigeSpeedPerClass * prestigeCount(); }
+function masteryCount() {
+  let n = 0; for (const k in G.profile.mastered) if (G.profile.mastered[k]) n++; return n;
+}
+// masteries in tiers BELOW this one cut its compound multiplier by 0.01 each
+function masteredBelowTier(tier) {
+  let n = 0;
+  for (const k in G.profile.mastered) {
+    if (G.profile.mastered[k] && CLASSES[k] && CLASSES[k].tier < tier) n++;
+  }
+  return n;
+}
+// the player's level cost base, with mastery-reduced compounding
+function playerLevelBase(classId, level) {
+  const c = CLASSES[classId];
+  const mult = Math.max(1.001, c.xpMult - CFG.masteryMultCut * masteredBelowTier(c.tier));
+  const base = c.baseXp + (c.flatStep || 0) * (level - 1);
+  return Math.round(base * Math.pow(mult, level - 1));
+}
 function playerCost(classId, level) {
-  let cost = levelCostRaw(classId, level);
+  let cost = playerLevelBase(classId, level);
   if (G.profile.prestiged[classId]) cost /= CFG.prestigeDivisor;
   const cap = (G.profile.maxLevel[classId] || 0) + prestigeCount();
   if (level <= cap) cost /= prestigeSpeedMult();
@@ -352,10 +373,8 @@ function enhancedDef(id) {
 function canPrestige(classId) {
   return !G.profile.prestiged[classId] && levelOf(classId) >= CFG.prestigeLevel;
 }
-function doPrestige(classId) {
-  if (!canPrestige(classId)) return false;
-  updateMaxLevel(classId);
-  G.profile.prestiged[classId] = true;
+// shared run reset (prestige & mastery both end the run)
+function resetRun() {
   Object.keys(G.profile.completedThisRun).forEach((key) => {
     G.profile.chapterClears[key] = (G.profile.chapterClears[key] || 0) + 1;
   });
@@ -373,8 +392,31 @@ function doPrestige(classId) {
   addClassXpDirect('classless', playerCost('classless', 1));
   G.profile.tomeSkills.forEach(grantAbility);
   checkCompletions();
+}
+function doPrestige(classId) {
+  if (!canPrestige(classId)) return false;
+  updateMaxLevel(classId);
+  G.profile.prestiged[classId] = true;
+  resetRun();
   save();
   return true;
+}
+// ---- mastery ----
+function canMaster(classId) {
+  return !G.profile.mastered[classId] && levelOf(classId) >= CFG.masteryLevel;
+}
+function doMastery(classId) {
+  if (!canMaster(classId)) return false;
+  updateMaxLevel(classId);
+  G.profile.mastered[classId] = true;
+  resetRun();
+  save();
+  return true;
+}
+// victory XP after Mastery bonuses: (base + 100×M) × (1 + M)
+function masteryXp(base) {
+  const m = masteryCount();
+  return Math.round((base + CFG.masteryXpFlat * m) * (1 + CFG.masteryXpPct * m));
 }
 
 // ---- drafts (tier 1.5+): pool = draft skills + learnable enemy abilities ----
@@ -483,12 +525,17 @@ function killXpFor(g) { const i = pageInfo(g); return i.killXp * i.mult; }
 function goldFor(g) { const i = pageInfo(g); return i.gold * i.mult; }
 
 // ---- enemy build data ----
+// Book 2 enemies: base stats = 20 + 2×Page + 8×Chapter (user formula)
+function enemyBaseStat(info, def, statKey) {
+  if (BOOKS[info.book].content === BOOK2) return 20 + 2 * info.page + 8 * info.chapter;
+  const filler = 3 + 2 * info.chapter;
+  return (def.stats && def.stats[statKey]) || filler;
+}
 function genEnemy(g) {
   const info = pageInfo(g);
   const def = info.enemy;
-  const filler = 3 + 2 * info.chapter + (info.book >= 1 ? 10 : 0);
   const stats = {};
-  STATS.forEach((s) => { stats[s] = ((def.stats && def.stats[s]) || filler) * info.mult; });
+  STATS.forEach((s) => { stats[s] = enemyBaseStat(info, def, s) * info.mult; });
   return {
     name: def.name, id: def.id,
     hp: def.hp * info.mult,
@@ -619,6 +666,54 @@ function scrapItem(invIdx) {
   G.profile.gold += scrapValue(item);
   G.profile.inventory.splice(invIdx, 1);
   save(); return true;
+}
+
+// ---- mass & auto salvage ----
+function itemMultPrefixes(it) {
+  return it.prefixes ? it.prefixes.filter((p) => p && p.mult > 1) : [];
+}
+function itemHasMaxRoll(it) {
+  return it.prefixes && it.prefixes.some((p) => p && p.base === it.level);
+}
+// salvage all bag GEAR matching the filter ('all' or an equip-slot key)
+function massSalvage(filter) {
+  let gold = 0, n = 0;
+  G.profile.inventory = G.profile.inventory.filter((it) => {
+    if (it.kind !== 'gear') return true;
+    if (filter !== 'all' && it.slot !== filter) return true;
+    gold += scrapValue(it); n += 1;
+    return false;
+  });
+  G.profile.gold += gold;
+  save();
+  return { n: n, gold: gold };
+}
+// auto-salvage pass. Order: salvage no-multiplier → extract single-multiplier
+// → salvage no-max-roll. Auto-extract waits until the 500g fee is affordable.
+function processAutoSalvage() {
+  const a = G.profile.autoSalv;
+  if (!a.noMult && !a.noMax && !a.extract) return { salvaged: 0, extracted: 0, gold: 0 };
+  let salvaged = 0, extracted = 0, gold = 0;
+  const keep = [];
+  G.profile.inventory.forEach((it) => {
+    if (it.kind !== 'gear') { keep.push(it); return; }
+    const mults = itemMultPrefixes(it);
+    if (a.noMult && mults.length === 0) { gold += scrapValue(it); salvaged += 1; return; }
+    if (a.extract && mults.length === 1 && G.profile.gold + gold >= CFG.bsCosts.extract) {
+      gold -= CFG.bsCosts.extract;
+      const p = mults[0];
+      keep.push({ kind: 'rune', stat: p.stat, base: p.base, mult: p.mult, amt: p.amt, level: it.level });
+      extracted += 1;
+      return;
+    }
+    if (a.extract && mults.length === 1) { keep.push(it); return; } // waiting for gold
+    if (a.noMax && !itemHasMaxRoll(it)) { gold += scrapValue(it); salvaged += 1; return; }
+    keep.push(it);
+  });
+  G.profile.inventory = keep;
+  G.profile.gold += gold;
+  if (salvaged || extracted) save();
+  return { salvaged: salvaged, extracted: extracted, gold: gold };
 }
 function equipItem(invIdx) {
   const item = G.profile.inventory[invIdx];

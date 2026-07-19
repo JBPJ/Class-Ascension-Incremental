@@ -14,6 +14,7 @@ UI.tipKw = null;             // nested keyword tooltip
 UI.tipExpire = 0;
 UI._holding = false;
 UI.inv = { sel: null, mode: null, pfx: null };
+UI.invFilter = 'all';        // all | head..shoulders | rune | tome
 UI.bestTab = 'settings';
 UI.bestBook = 0;
 UI.bestSource = 'all';
@@ -412,14 +413,66 @@ UI.inventoryTab = function () {
   });
   h += '</div>';
   h += '<h3>Bag (' + p.inventory.length + '/' + CFG.invSize + ')</h3>';
+
+  // filters: All / gear slots / Rune / Tome
+  h += '<div class="filterbar"><button class="filterbtn ' + (UI.invFilter === 'all' ? 'on' : '') + '" onclick="UI.setInvFilter(\'all\')">All</button>';
+  Object.keys(EQUIP_SLOTS).forEach((k) => {
+    h += '<button class="filterbtn ' + (UI.invFilter === k ? 'on' : '') + '" onclick="UI.setInvFilter(\'' + k + '\')">' + EQUIP_SLOTS[k] + '</button>';
+  });
+  ['rune', 'tome'].forEach((k) => {
+    h += '<button class="filterbtn ' + (UI.invFilter === k ? 'on' : '') + '" onclick="UI.setInvFilter(\'' + k + '\')">' + (k === 'rune' ? 'Runes' : 'Tomes') + '</button>';
+  });
+  h += '</div>';
+
+  // mass salvage (gear only, respects the current filter)
+  const gearFilter = UI.invFilter !== 'rune' && UI.invFilter !== 'tome';
+  const matchCount = p.inventory.filter((it) => it.kind === 'gear' && (UI.invFilter === 'all' || it.slot === UI.invFilter)).length;
+  h += '<div class="row" style="margin-bottom:8px"><button class="btn small" ' +
+    (gearFilter && matchCount ? 'onclick="UI.massSalvage()"' : 'disabled') + '>Mass Salvage Gear (' + (gearFilter ? matchCount : 0) + ')</button></div>';
+
+  // auto-salvage toggles
+  const a = p.autoSalv;
+  h += '<div class="card"><b class="small">Gear Auto Salvage</b>';
+  [['noMult', 'Salvage gear with no multiplier rolls'],
+   ['extract', 'Auto Extract single-multiplier gear (' + CFG.bsCosts.extract + 'g each; waits if broke)'],
+   ['noMax', 'Salvage gear with no max roll for its item level']].forEach((t) => {
+    h += '<div class="upg"><div class="small">' + t[1] + '</div>' +
+      '<button class="btn small ' + (a[t[0]] ? 'primary' : '') + '" onclick="UI.toggleSalv(\'' + t[0] + '\')">' + (a[t[0]] ? 'ON' : 'OFF') + '</button></div>';
+  });
+  h += '<div class="small dim">Order: no-multiplier salvage → single-multiplier extract → no-max-roll salvage.</div></div>';
+
+  let list = p.inventory.map((it, idx) => ({ it: it, idx: idx }));
+  if (UI.invFilter === 'rune') list = list.filter((x) => x.it.kind === 'rune');
+  else if (UI.invFilter === 'tome') list = list.filter((x) => x.it.kind === 'tome');
+  else if (UI.invFilter !== 'all') list = list.filter((x) => x.it.kind === 'gear' && x.it.slot === UI.invFilter);
   if (!p.inventory.length) h += '<div class="dim small">Empty — enemies can drop gear (10%), runes (1%) and tomes (0.1%).</div>';
-  p.inventory.forEach((it, idx) => {
-    const on = UI.inv.sel === idx;
-    h += '<div class="invrow sel-' + on + '" onclick="UI.invSelect(' + idx + ')">' + itemSummary(it) + '</div>';
-    if (on) h += itemDetail(it, idx);
+  else if (!list.length) h += '<div class="dim small">Nothing matches this filter.</div>';
+  list.forEach((x) => {
+    const on = UI.inv.sel === x.idx;
+    h += '<div class="invrow sel-' + on + '" onclick="UI.invSelect(' + x.idx + ')">' + itemSummary(x.it) + '</div>';
+    if (on) h += itemDetail(x.it, x.idx);
   });
   h += '</div>';
   return h;
+};
+UI.setInvFilter = function (f) { UI.invFilter = f; UI.inv = { sel: null, mode: null, pfx: null }; UI.session(); };
+UI.massSalvage = function () {
+  const r = massSalvage(UI.invFilter === 'all' ? 'all' : UI.invFilter);
+  UI.inv = { sel: null, mode: null, pfx: null };
+  rebuildPlayer();
+  UI.session();
+};
+UI.toggleSalv = function (key) {
+  const a = G.profile.autoSalv;
+  a[key] = !a[key];
+  if (a[key]) {
+    // OK = apply to the whole bag right now; Cancel = only new gear from here on
+    if (confirm('Apply this to your ENTIRE bag right now?\nOK = whole bag · Cancel = only new gear')) {
+      processAutoSalvage();
+    }
+  }
+  save();
+  UI.session();
 };
 function itemSummary(it) {
   if (it.kind === 'tome') {
@@ -517,9 +570,7 @@ UI.pickPfx = function (pi) {
   const it = G.profile.inventory[UI.inv.sel];
   if (!it) return;
   if (UI.inv.mode === 'extract') {
-    if (confirm('Destroy this ' + it.name + ' and save that stat as a rune? (' + CFG.bsCosts.extract + 'g)')) {
-      if (bsExtract(UI.inv.sel, pi)) { UI.inv = { sel: null, mode: null, pfx: null }; }
-    }
+    if (bsExtract(UI.inv.sel, pi)) { UI.inv = { sel: null, mode: null, pfx: null }; }
     UI.session(); return;
   }
   UI.inv.pfx = pi; UI.session();
@@ -546,9 +597,7 @@ UI.unequip = function (slotKey) {
   UI.session();
 };
 UI.scrap = function (idx) {
-  const it = G.profile.inventory[idx];
-  if (it && confirm('Scrap this for ' + scrapValue(it) + ' gold?')) {
-    scrapItem(idx);
+  if (scrapItem(idx)) {
     UI.inv = { sel: null, mode: null, pfx: null };
     rebuildPlayer();
   }
@@ -590,7 +639,7 @@ UI.treeTab = function () {
     const lvl = levelOf(id);
     const best = G.profile.maxLevel[id] || 0;
     const unlocked = classUnlocked(id);
-    const ready = canPrestige(id);
+    const ready = canPrestige(id) || canMaster(id);
     const isSel = id === sel;
     const stroke = ready || isSel ? '#e8c468' : unlocked ? '#7c5cff' : '#3a3d52';
     h += '<g class="tnode' + (unlocked ? '' : ' locked') + (ready ? ' ready' : '') + '" ' +
@@ -600,7 +649,8 @@ UI.treeTab = function () {
     const words = c.name.split(' ');
     const line1 = words.length > 1 ? words.slice(0, -1).join(' ') : c.name;
     const line2 = words.length > 1 ? words[words.length - 1] : '';
-    h += '<text x="' + pos[0] + '" y="' + (pos[1] - (line2 ? 12 : 6)) + '" class="tname">' + esc(line1) + (G.profile.prestiged[id] ? ' ★' : '') + '</text>';
+    h += '<text x="' + pos[0] + '" y="' + (pos[1] - (line2 ? 12 : 6)) + '" class="tname">' + esc(line1) +
+      (G.profile.prestiged[id] ? ' ★' : '') + (G.profile.mastered[id] ? ' ◆' : '') + '</text>';
     if (line2) h += '<text x="' + pos[0] + '" y="' + (pos[1] - 1) + '" class="tname">' + esc(line2) + '</text>';
     h += '<text x="' + pos[0] + '" y="' + (pos[1] + 13) + '" class="tlvl">' + (unlocked ? 'Lv ' + lvl : '🔒') + '</text>';
     h += '<text x="' + pos[0] + '" y="' + (pos[1] + 26) + '" class="tbest">best ' + best + '</text>';
@@ -631,10 +681,20 @@ UI.treeTab = function () {
   } else {
     h += '<div class="small dim" style="margin-top:8px">Reach Lv ' + CFG.prestigeLevel + ' to prestige (currently ' + lp.level + ').</div>';
   }
+  // mastery
+  if (G.profile.mastered[sel]) h += '<div class="small" style="color:var(--gold);margin-top:6px">◆ Mastered.</div>';
+  else if (canMaster(sel)) {
+    h += '<div style="margin-top:10px"><button class="btn primary" onclick="UI.master(\'' + sel + '\')">Master ' + esc(c.name) + '</button>';
+    h += '<div class="small dim" style="margin-top:4px">Resets the run like a prestige. Permanently: +' + CFG.masteryXpFlat + ' base victory XP then +' + (CFG.masteryXpPct * 100) + '% per Mastery, and higher-tier classes compound ' + CFG.masteryMultCut + ' slower.</div></div>';
+  } else if (!G.profile.mastered[sel]) {
+    h += '<div class="small dim" style="margin-top:4px">Reach Lv ' + CFG.masteryLevel + ' to Master (currently ' + lp.level + ').</div>';
+  }
   h += '</div>';
   const pc = prestigeCount();
+  const mc = masteryCount();
   h += '<div class="card small"><b>Prestige</b> — ' + pc + ' class' + (pc === 1 ? '' : 'es') +
-    ' prestiged · all classes level ' + Math.round((prestigeSpeedMult() - 1) * 100) + '% faster (up to highest reached +' + pc + ').</div>';
+    ' prestiged · all classes level ' + Math.round((prestigeSpeedMult() - 1) * 100) + '% faster (up to highest reached +' + pc + ').' +
+    '<br><b>Mastery</b> — ' + mc + ' class' + (mc === 1 ? '' : 'es') + ' mastered · victory XP = (base + ' + (CFG.masteryXpFlat * mc) + ') × ' + (1 + CFG.masteryXpPct * mc) + '.</div>';
   h += '</div>';
   return h;
 };
@@ -660,6 +720,14 @@ UI.prestige = function (id) {
   if (!canPrestige(id)) return;
   if (!confirm('Prestige ' + CLASSES[id].name + '? The run restarts at Classless Lv1 (levels, skills & EP lost; tome skills kept), but you gain permanent leveling speed and lower win requirements for completed chapters.')) return;
   doPrestige(id);
+  endSession();
+  UI.tab = 'combat';
+  UI.home();
+};
+UI.master = function (id) {
+  if (!canMaster(id)) return;
+  if (!confirm('Master ' + CLASSES[id].name + '? The run restarts at Classless Lv1 (like a prestige), but victory XP permanently rises and higher-tier classes level cheaper.')) return;
+  doMastery(id);
   endSession();
   UI.tab = 'combat';
   UI.home();
@@ -881,8 +949,10 @@ function bestEnemies() {
     h += '<h3>Ch' + (ci + 1) + ' — ' + esc(ch.name) + '</h3>';
     met.forEach((pg) => {
       h += '<div class="card"><b>' + esc(pg.name) + '</b> <span class="small dim">' + pg.hp + ' HP</span>';
-      const filler = 3 + 2 * (ci + 1) + (UI.bestBook >= 1 ? 10 : 0);
-      const stats = {}; STATS.forEach((s) => (stats[s] = (pg.stats && pg.stats[s]) || filler));
+      const pi = ch.pages.indexOf(pg) + 1;
+      const isB2 = BOOKS[UI.bestBook].content === BOOK2;
+      const stats = {};
+      STATS.forEach((s) => (stats[s] = isB2 ? (20 + 2 * pi + 8 * (ci + 1)) : ((pg.stats && pg.stats[s]) || (3 + 2 * (ci + 1)))));
       h += '<div class="small" style="margin:4px 0">' + statChips(stats) + '</div>';
       pg.abilities.forEach((id) => {
         const def = ABILITIES[id];

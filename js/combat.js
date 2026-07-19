@@ -138,10 +138,8 @@ function buildAlly(defId, forPlayer, g) {
   let def = null;
   content.forEach((ch) => ch.pages.forEach((p) => { if (p.id === defId) def = p; }));
   if (!def) return null;
-  const ed = genEnemy(g); // same mult context
-  const filler = 3 + 2 * info.chapter + (info.book >= 1 ? 10 : 0);
   const stats = {};
-  STATS.forEach((s) => { stats[s] = ((def.stats && def.stats[s]) || filler) * info.mult; });
+  STATS.forEach((s) => { stats[s] = enemyBaseStat(info, def, s) * info.mult; });
   const a = combatant(def.name, def.id, 0, stats, def.abilities, false);
   a.maxHp = def.hp * info.mult; a.hp = a.maxHp;
   a.isAlly = true; a.allyOfPlayer = !!forPlayer;
@@ -250,6 +248,12 @@ function addStatus(unit, key, opts) {
   opts = opts || {};
   const meta = statusMeta(key);
   if (!meta) return;
+  // Purity: the next debuff is negated
+  if (meta.bad && unit.status.purity && unit.status.purity.count > 0) {
+    consumeCharge(unit, 'purity');
+    logMsg(unit.name + '\'s Purity negates ' + meta.name + '!');
+    return;
+  }
   if (meta.kind === 'instant') return applyInstantStatus(unit, key, opts.dur || 1);
   if (meta.kind === 'charge') {
     const e = unit.status[key] || (unit.status[key] = { count: 0 });
@@ -483,6 +487,7 @@ function applyOps(ops, caster, target, label, tag, ctx) {
     switch (op.t) {
       case 'dmg': {
         let dmg = n * CFG.dmgScale + tagDmg;
+        if (op.pctMaxHp) dmg += caster.maxHp * op.pctMaxHp; // e.g. Body Bash: 10% max HP
         if (firstDmg) { dmg += ctx.extra; firstDmg = false; }
         dmg *= ctx.mult;
         if (C.reverse && caster.isPlayer) {
@@ -556,9 +561,10 @@ function formulaOps(ops, unit) {
     }
     let f = '' + op.base;
     const es = effStats(unit);
+    if (op.pctMaxHp) f += ' + ' + Math.round(op.pctMaxHp * 100) + '% max HP(' + Math.round(unit.maxHp * op.pctMaxHp) + ')';
     if (op.mult && op.stat) f += ' + ' + op.mult + '×' + STAT_INFO[op.stat].abbr + '(' + Math.round(es[op.stat] || 0) + ')';
     if (op.mult && op.stat2) f += ' + ' + op.mult + '×' + STAT_INFO[op.stat2].abbr + '(' + Math.round(es[op.stat2] || 0) + ')';
-    const n = Math.round(opAmount(op, es));
+    const n = Math.round(opAmount(op, es) + (op.pctMaxHp ? unit.maxHp * op.pctMaxHp : 0));
     const names = { dmg: (op.kind === 'mag' ? 'Magic damage' : 'Physical damage'), heal: 'Heal',
       shield: 'Shield' + (op.overcap ? ' (Overcap)' : ''), dot: (op.label || 'DoT') + '/s (' + op.secs + 's)',
       buff: 'Damage buff (' + op.secs + 's)', weaken: 'Enemy damage cut (' + op.secs + 's)' };
@@ -632,7 +638,6 @@ function castAbility(unit, target, slot, free, isInitiate) {
     logMsg(unit.name + ' • ' + def.name + ': its hatred grows...');
     return true;
   }
-  if (def.special === 'cleanse') { cleanseOne(unit); }
   if (def.rally) {
     const mySide = (unit === C.player || unit.allyOfPlayer) ? C.pAllies : C.eAllies;
     if (mySide.length < CFG.maxAllies) {
@@ -663,6 +668,10 @@ function castAbility(unit, target, slot, free, isInitiate) {
         tgt = unit; logMsg(unit.name + ' is Confused and lashes out at... themselves!');
       }
       if (unit.status.empower && unit.status.empower.count) { ctx.extra += effStats(unit).pie; consumeCharge(unit, 'empower'); }
+      if (def.doubleIfProtected && stHas(unit, 'protection')) ctx.mult *= 2;
+      if (def.followDmg && slot.followStacks > 0) {
+        ctx.extra += slot.followStacks * (def.followDmg.base + def.followDmg.mult * (effStats(unit)[def.followDmg.stat] || 0));
+      }
       if (unit.concepts['repeating-focus'] && isSpell(def)) { ctx.extra += slot.rf; slot.rf += 1; }
       if (unit.concepts['fury'] && ctx.isSkill && def.tag === 'str') ctx.extra += unit.fury;
       if (unit.concepts['arcane-crafted'] && free && !isInitiate && isSpell(def)) ctx.mult *= 1.5;
@@ -857,7 +866,7 @@ function onWin() {
   C.over = true;
   const sel = G.profile.selectedClass;
   const g = G.profile.node;
-  const xp = killXpFor(g);
+  const xp = masteryXp(killXpFor(g)); // (base + 100×M) × (1 + M)
   addClassXp(sel, xp);
   addStatXp(sel, xp);
   recordWin();
@@ -876,6 +885,11 @@ function onWin() {
   if (Math.random() < CFG.tomeChance) {
     const tome = genTome();
     if (tome) { G.profile.inventory.push(tome); msg += ' — a TOME drops!'; }
+  }
+  const auto = processAutoSalvage();
+  if (auto.salvaged || auto.extracted) {
+    msg += ' [auto: ' + (auto.salvaged ? auto.salvaged + ' salvaged' : '') +
+      (auto.extracted ? (auto.salvaged ? ', ' : '') + auto.extracted + ' extracted' : '') + ']';
   }
   logMsg(msg + ' (' + winsOn(g) + '/' + reqFor(g) + ' wins)');
   checkCompletions().forEach(logMsg);
