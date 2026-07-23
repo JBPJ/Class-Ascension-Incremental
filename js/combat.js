@@ -65,12 +65,15 @@ function combatant(name, classId, level, stats, slotIds, isPlayer) {
   };
   c.abil = slotIds.map((id) => (id ? slotState(c, id) : null));
   c.abil.forEach((s) => {
-    if (s && abilityDef(s.id) && abilityDef(s.id).concept) c.concepts[s.id] = true;
+    if (s && abilityDef(s.id) && abilityDef(s.id).concept) { c.concepts[s.id] = true; applyConceptBuild(c, s.id, stats); }
   });
-  if (c.concepts['watched-over']) { c.maxHp += stats.fai; c.hp = c.maxHp; }
-  if (c.concepts['diseased']) c.hpRegen = 0;
-  if (c.concepts['in-the-name-of']) c.resonRegen = 0;
   return c;
+}
+// build-time effects of a concept (also used for player Embodiments)
+function applyConceptBuild(c, id, stats) {
+  if (id === 'watched-over') { c.maxHp += stats.fai * 2; c.hp = c.maxHp; }
+  else if (id === 'diseased') c.hpRegen = 0;
+  else if (id === 'in-the-name-of') c.resonRegen = 0;
 }
 
 function buildPlayer() {
@@ -86,6 +89,10 @@ function buildPlayer() {
   c.manaRegen += ub.manaRegen;
   c.maxReson += ub.reson;
   c.resonRegen += ub.resonRegen;
+  // Embodied concepts stay active even without an equipped slot
+  embodiedConcepts().forEach((id) => {
+    if (!c.concepts[id]) { c.concepts[id] = true; applyConceptBuild(c, id, stats); }
+  });
   if (c.concepts['in-the-name-of']) c.resonRegen = 0;
   c.dmgByTag = ub.dmgByTag;
   return c;
@@ -141,7 +148,7 @@ function buildAlly(defId, forPlayer, g) {
   const stats = {};
   STATS.forEach((s) => { stats[s] = enemyBaseStat(info, def, s) * info.mult; });
   const a = combatant(def.name, def.id, 0, stats, def.abilities, false);
-  a.maxHp = def.hp * info.mult; a.hp = a.maxHp;
+  a.maxHp = enemyHpVal(info, def); a.hp = a.maxHp;
   a.isAlly = true; a.allyOfPlayer = !!forPlayer;
   return a;
 }
@@ -177,10 +184,10 @@ function newBattle() {
     if (fs) fs.sustaining = { acc: 0, threshold: 0.10 * enemy.maxHp };
   }
   if (C.reverse) {
-    // she is halfway down and bleeding out the whole combat
+    // she is halfway down and bleeding out (2×Bleed, 2×Poison over 120s)
     enemy.hp = enemy.maxHp / 2;
-    addStatus(enemy, 'bleed', { dur: 9999, src: enemy });
-    addStatus(enemy, 'poison', { dur: 9999, src: enemy });
+    addStatus(enemy, 'bleed', { dur: 120, stacks: 2, src: enemy });
+    addStatus(enemy, 'poison', { dur: 120, stacks: 2, src: enemy });
   }
   logMsg(enemy.name + ' — ' + C.info.bookName + ', "' + C.info.chapterName + '", Page ' + C.info.page + '.');
   // Initiate abilities fire at the start of combat
@@ -423,8 +430,8 @@ function dealDamage(caster, target, amt, opts) {
     if (stHas(target, 'fracture')) addStatus(target, 'bruised', { dur: 5, src: caster });
     if (target.concepts['panic'] && !target.panicked && target.hp <= target.maxHp * 0.5) {
       target.panicked = true;
-      addStatus(target, 'agile', { dur: 9999 });
-      addStatus(target, 'confusion', { count: 99 });
+      addStatus(target, 'agile', { dur: 12 });
+      addStatus(target, 'confusion', { count: 3 });
       logMsg(target.name + ' panics!');
     }
     if (target.concepts['buckle']) {
@@ -510,8 +517,14 @@ function applyOps(ops, caster, target, label, tag, ctx) {
       }
       case 'st': {
         const who = op.to === 'self' ? [caster] : op.to === 'both' ? [caster, target] : [target];
+        let stDur = op.dur;
+        // Creeping Frost: each Frost you inflict lengthens future Frosts
+        if (op.key === 'frost' && caster.concepts['creeping-frost']) {
+          stDur = (op.dur || 0) + (caster.creepFrost || 0);
+          caster.creepFrost = (caster.creepFrost || 0) + 1;
+        }
         who.forEach((w) => addStatus(w, op.key, {
-          dur: op.dur, count: op.count, stacks: op.stacks, src: caster,
+          dur: stDur, count: op.count, stacks: op.stacks, src: caster,
           valBase: op.valBase, valMult: op.valMult, valStat: op.valStat,
           enchKey: op.enchKey, enchDur: op.enchDur,
         }));
@@ -672,7 +685,6 @@ function castAbility(unit, target, slot, free, isInitiate) {
       if (def.followDmg && slot.followStacks > 0) {
         ctx.extra += slot.followStacks * (def.followDmg.base + def.followDmg.mult * (effStats(unit)[def.followDmg.stat] || 0));
       }
-      if (unit.concepts['repeating-focus'] && isSpell(def)) { ctx.extra += slot.rf; slot.rf += 1; }
       if (unit.concepts['fury'] && ctx.isSkill && def.tag === 'str') ctx.extra += unit.fury;
       if (unit.concepts['arcane-crafted'] && free && !isInitiate && isSpell(def)) ctx.mult *= 1.5;
       if (isInitiate && def.initDmgMult) ctx.mult *= def.initDmgMult;

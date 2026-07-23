@@ -9,6 +9,7 @@ UI.bookSource = 'all';       // all | tome | class
 UI.bookFilter = 'all';       // stat filter
 UI.bookSel = null;           // selected ability id (popup)
 UI.enhOpen = false;
+UI.pendingReset = null;      // {type:'prestige'|'mastery', classId} — gear inheritance picker
 UI.tip = null;               // {kind:'slot'|'eslot'|'ally'|'allyx'|'kw', arg}
 UI.tipKw = null;             // nested keyword tooltip
 UI.tipExpire = 0;
@@ -618,6 +619,7 @@ const TREE_POS = {
   duelist: [50, 80], knight: [140, 80], ranger: [230, 80], druid: [320, 80], scholar: [410, 80],
 };
 UI.treeTab = function () {
+  if (UI.pendingReset) return inheritancePicker();
   const sel = G.profile.selectedClass;
   let h = '<div class="screen">';
   h += '<h2>Class Tree</h2>';
@@ -677,7 +679,7 @@ UI.treeTab = function () {
   if (G.profile.prestiged[sel]) h += '<div class="small" style="color:var(--gold);margin-top:8px">★ Prestiged — levels ' + CFG.prestigeDivisor + '× faster.</div>';
   else if (canPrestige(sel)) {
     h += '<div style="margin-top:10px"><button class="btn primary" onclick="UI.prestige(\'' + sel + '\')">Prestige ' + esc(c.name) + '</button>';
-    h += '<div class="small dim" style="margin-top:4px">Resets the run to Classless Lv1 (levels, skills, EP lost; tome skills kept). Completed chapters lower future win requirements.</div></div>';
+    h += '<div class="small dim" style="margin-top:4px">Resets to Classless Lv1 (levels, skills, EP lost; tome skills kept). Choose 1 gear piece to inherit; the rest is lost. Completed chapters lower future win requirements.</div></div>';
   } else {
     h += '<div class="small dim" style="margin-top:8px">Reach Lv ' + CFG.prestigeLevel + ' to prestige (currently ' + lp.level + ').</div>';
   }
@@ -718,20 +720,51 @@ UI.selectClass = function (id) {
 };
 UI.prestige = function (id) {
   if (!canPrestige(id)) return;
-  if (!confirm('Prestige ' + CLASSES[id].name + '? The run restarts at Classless Lv1 (levels, skills & EP lost; tome skills kept), but you gain permanent leveling speed and lower win requirements for completed chapters.')) return;
-  doPrestige(id);
-  endSession();
-  UI.tab = 'combat';
-  UI.home();
+  UI.pendingReset = { type: 'prestige', classId: id };
+  UI.session();
 };
 UI.master = function (id) {
   if (!canMaster(id)) return;
-  if (!confirm('Master ' + CLASSES[id].name + '? The run restarts at Classless Lv1 (like a prestige), but victory XP permanently rises and higher-tier classes level cheaper.')) return;
-  doMastery(id);
+  UI.pendingReset = { type: 'mastery', classId: id };
+  UI.session();
+};
+// gear list in a stable order for the inheritance picker
+function inheritGearList() {
+  const gear = [];
+  Object.keys(EQUIP_SLOTS).forEach((k) => { if (G.profile.equipment[k]) gear.push({ item: G.profile.equipment[k], where: 'equipped · ' + EQUIP_SLOTS[k] }); });
+  G.profile.inventory.forEach((it) => { if (it.kind === 'gear') gear.push({ item: it, where: 'bag' }); });
+  return gear;
+}
+function inheritancePicker() {
+  const pr = UI.pendingReset;
+  const verb = pr.type === 'mastery' ? 'Master' : 'Prestige';
+  let h = '<div class="screen"><h2>' + verb + ' — choose your Inheritance</h2>';
+  h += '<p class="small dim">All other gear is lost on ' + verb.toLowerCase() + '. Keep one piece, or keep nothing. (Runes and Tomes are unaffected.)</p>';
+  const gear = inheritGearList();
+  if (!gear.length) h += '<div class="card dim">You have no gear to inherit.</div>';
+  gear.forEach((g, i) => {
+    h += '<div class="invrow"><span>' + itemSummary(g.item) + ' <span class="small dim">(' + g.where + ')</span></span>' +
+      '<button class="btn small primary" onclick="UI.confirmReset(' + i + ')">Keep</button></div>';
+  });
+  h += '<div class="row" style="flex-wrap:wrap;margin-top:10px">' +
+    '<button class="btn" onclick="UI.confirmReset(-1)">' + verb + ' — keep nothing</button>' +
+    '<button class="btn" onclick="UI.cancelReset()">Cancel</button></div>';
+  h += '</div>';
+  return h;
+}
+UI.confirmReset = function (i) {
+  const pr = UI.pendingReset;
+  if (!pr) return;
+  const gear = inheritGearList();
+  const inherit = i >= 0 && gear[i] ? gear[i].item : null;
+  if (pr.type === 'mastery') doMastery(pr.classId, inherit);
+  else doPrestige(pr.classId, inherit);
+  UI.pendingReset = null;
   endSession();
   UI.tab = 'combat';
   UI.home();
 };
+UI.cancelReset = function () { UI.pendingReset = null; UI.session(); };
 
 // ================= Upgrades tab =================
 UI.upgradesTab = function () {
@@ -854,7 +887,8 @@ function abilityPopup(id) {
   h += '</div>';
   if (UI.enhOpen) {
     const e = enhOf(id);
-    h += '<div class="small dim" style="margin:6px 0">EP spent here: ' + e.spent + ' — every EP adds +1 flat damage (damage abilities); every 2 EP adds +1 resource cost.</div>';
+    if (ABILITIES[id].concept) h += '<div class="small dim" style="margin:6px 0">Embody this Concept to keep it active without spending a slot.</div>';
+    else h += '<div class="small dim" style="margin:6px 0">EP spent here: ' + e.spent + ' — every EP adds +1 flat damage (damage abilities); every 2 EP adds +1 resource cost.</div>';
     enhanceOptions(id).forEach((o) => {
       const can = p.ep >= o.cost;
       h += '<div class="upg"><div>' + o.label + ' <span class="small dim">' + o.cost + ' EP</span></div>' +

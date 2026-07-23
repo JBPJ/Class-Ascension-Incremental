@@ -196,11 +196,22 @@ function characterStats() {
   });
   const eq = equipmentStats();
   STATS.forEach((st) => (s[st] += eq[st]));
-  if (G.profile.slots.indexOf('determination') !== -1) {
+  if (conceptActive('determination')) {
     const m = 1 + 0.002 * (G.profile.maxLevel.classless || 0);
     s.sol *= m; s.per *= m;
   }
   return s;
+}
+
+// a concept is active if equipped OR permanently Embodied (25 EP enhancement)
+function conceptActive(id) {
+  if (G.profile.slots.indexOf(id) !== -1) return true;
+  const e = G.profile.enhance[id];
+  return !!(e && e.embody);
+}
+function embodiedConcepts() {
+  return Object.keys(G.profile.enhance).filter((id) =>
+    G.profile.enhance[id].embody && ABILITIES[id] && ABILITIES[id].concept);
 }
 
 // ---- class unlocks & grants ----
@@ -307,6 +318,11 @@ function buyBackAbility(id) {
 function enhanceOptions(id) {
   const def = ABILITIES[id];
   const opts = [];
+  if (def.concept) {
+    const e = G.profile.enhance[id];
+    if (!(e && e.embody)) opts.push({ key: 'embody', label: 'Embodiment (stays active unequipped)', cost: 25 });
+    return opts; // concepts only offer Embodiment
+  }
   if (def.full && def.full.some((op) => op.t === 'dmg' && op.stat)) {
     opts.push({ key: 'multi', label: '+0.1× stat multiplier', cost: 1 });
   }
@@ -330,7 +346,8 @@ function buyEnhance(id, optKey, cost) {
   G.profile.ep -= cost;
   const e = enhOf(id);
   e.spent += cost;
-  if (optKey === 'multi') e.multi += 1;
+  if (optKey === 'embody') e.embody = true;
+  else if (optKey === 'multi') e.multi += 1;
   else if (optKey === 'charge') e.charge += 1;
   else if (optKey === 'burst') e.burst += 1;
   else if (optKey === 'ammo') e.ammo += 1;
@@ -373,8 +390,12 @@ function enhancedDef(id) {
 function canPrestige(classId) {
   return !G.profile.prestiged[classId] && levelOf(classId) >= CFG.prestigeLevel;
 }
-// shared run reset (prestige & mastery both end the run)
-function resetRun() {
+// shared run reset (prestige & mastery both end the run).
+// gear is lost except one inherited piece (an item object, or null).
+function resetRun(inheritItem) {
+  Object.keys(G.profile.equipment).forEach((k) => (G.profile.equipment[k] = null));
+  G.profile.inventory = G.profile.inventory.filter((it) => it.kind !== 'gear');
+  if (inheritItem && inheritItem.kind === 'gear') G.profile.inventory.push(inheritItem);
   Object.keys(G.profile.completedThisRun).forEach((key) => {
     G.profile.chapterClears[key] = (G.profile.chapterClears[key] || 0) + 1;
   });
@@ -393,11 +414,11 @@ function resetRun() {
   G.profile.tomeSkills.forEach(grantAbility);
   checkCompletions();
 }
-function doPrestige(classId) {
+function doPrestige(classId, inheritItem) {
   if (!canPrestige(classId)) return false;
   updateMaxLevel(classId);
   G.profile.prestiged[classId] = true;
-  resetRun();
+  resetRun(inheritItem);
   save();
   return true;
 }
@@ -405,11 +426,11 @@ function doPrestige(classId) {
 function canMaster(classId) {
   return !G.profile.mastered[classId] && levelOf(classId) >= CFG.masteryLevel;
 }
-function doMastery(classId) {
+function doMastery(classId, inheritItem) {
   if (!canMaster(classId)) return false;
   updateMaxLevel(classId);
   G.profile.mastered[classId] = true;
-  resetRun();
+  resetRun(inheritItem);
   save();
   return true;
 }
@@ -531,6 +552,11 @@ function enemyBaseStat(info, def, statKey) {
   const filler = 3 + 2 * info.chapter;
   return (def.stats && def.stats[statKey]) || filler;
 }
+// Book 2 enemies have doubled health
+function enemyHpVal(info, def) {
+  const bookMult = (BOOKS[info.book].content === BOOK2) ? 2 : 1;
+  return def.hp * info.mult * bookMult;
+}
 function genEnemy(g) {
   const info = pageInfo(g);
   const def = info.enemy;
@@ -538,7 +564,7 @@ function genEnemy(g) {
   STATS.forEach((s) => { stats[s] = enemyBaseStat(info, def, s) * info.mult; });
   return {
     name: def.name, id: def.id,
-    hp: def.hp * info.mult,
+    hp: enemyHpVal(info, def),
     stats: stats,
     abilities: def.abilities.slice(),
     allies: (def.allies || []).slice(),
